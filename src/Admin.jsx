@@ -43,6 +43,18 @@ export default function Admin() {
   const [products, setProducts] = useState([]);
   const [purchases, setPurchases] = useState([]);
   const [orders, setOrders] = useState([]);
+  const [sales, setSales] = useState([]);
+
+  const [saleCart, setSaleCart] = useState([]);
+  const [saleSearch, setSaleSearch] = useState("");
+  const [saleCustomerName, setSaleCustomerName] = useState("");
+  const [salePhone, setSalePhone] = useState("");
+  const [salePayment, setSalePayment] = useState("Cash");
+  const [savingSale, setSavingSale] = useState(false);
+  const [selectedSale, setSelectedSale] = useState(null);
+
+  const [selectedOrder, setSelectedOrder] = useState(null);
+  const [updatingOrderId, setUpdatingOrderId] = useState(null);
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -53,6 +65,9 @@ export default function Admin() {
 
   const [productForm, setProductForm] = useState(emptyProduct);
   const [editingProduct, setEditingProduct] = useState(null);
+  const [imageFile, setImageFile] = useState(null);
+  const [imagePreview, setImagePreview] = useState("");
+  const [removeImage, setRemoveImage] = useState(false);
 
   const [purchaseForm, setPurchaseForm] = useState(emptyPurchase);
   const [editingPurchase, setEditingPurchase] = useState(null);
@@ -159,7 +174,6 @@ export default function Admin() {
       .order("id", { ascending: false });
 
     if (error) throw error;
-
     setProducts(data || []);
   }
 
@@ -171,8 +185,17 @@ export default function Admin() {
       .order("id", { ascending: false });
 
     if (error) throw error;
-
     setPurchases(data || []);
+  }
+
+  async function loadSales() {
+    const { data, error } = await supabase
+      .from("sales")
+      .select("*")
+      .order("id", { ascending: false });
+
+    if (error) throw error;
+    setSales(data || []);
   }
 
   async function loadOrders() {
@@ -182,8 +205,37 @@ export default function Admin() {
       .order("id", { ascending: false });
 
     if (error) throw error;
-
     setOrders(data || []);
+  }
+
+  // UPDATE ORDER STATUS
+
+  async function updateOrderStatus(orderId, newStatus) {
+    setError("");
+    setMessage("");
+    setUpdatingOrderId(orderId);
+
+    const { error } = await supabase
+      .from("orders")
+      .update({ status: newStatus })
+      .eq("id", orderId);
+
+    setUpdatingOrderId(null);
+
+    if (error) {
+      setError("Could not update order: " + error.message);
+      return;
+    }
+
+    setMessage(`Order #${orderId} updated to ${newStatus}.`);
+
+    await loadOrders();
+
+    setSelectedOrder((current) =>
+      current && current.id === orderId
+        ? { ...current, status: newStatus }
+        : current
+    );
   }
 
   async function loadAll() {
@@ -195,6 +247,7 @@ export default function Admin() {
         loadProducts(),
         loadPurchases(),
         loadOrders(),
+        loadSales(),
       ]);
     } catch (err) {
       setError(err.message || "Could not load data.");
@@ -204,9 +257,20 @@ export default function Admin() {
   }
 
   useEffect(() => {
-    if (isAdmin) {
-      loadAll();
+    if (!isAdmin) return;
+
+    let cancelled = false;
+
+    async function fetchData() {
+      if (cancelled) return;
+      await loadAll();
     }
+
+    fetchData();
+
+    return () => {
+      cancelled = true;
+    };
   }, [isAdmin]);
 
   // QR CODE GENERATION
@@ -323,6 +387,81 @@ export default function Admin() {
     [purchases]
   );
 
+  // PRODUCT IMAGE FUNCTIONS
+
+  function handleImageChange(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (!file.type.startsWith("image/")) {
+      setError("Please select a valid image.");
+      e.target.value = "";
+      return;
+    }
+
+    if (file.size > 5 * 1024 * 1024) {
+      setError("Image size must be less than 5 MB.");
+      e.target.value = "";
+      return;
+    }
+
+    setError("");
+    setImageFile(file);
+    setImagePreview(URL.createObjectURL(file));
+    setRemoveImage(false);
+  }
+
+  function clearSelectedImage() {
+    if (imagePreview.startsWith("blob:")) {
+      URL.revokeObjectURL(imagePreview);
+    }
+
+    setImageFile(null);
+    setImagePreview("");
+    setRemoveImage(true);
+  }
+
+  async function uploadProductImage() {
+    if (!imageFile) {
+      return removeImage ? "" : productForm.image_url;
+    }
+
+    const extension =
+      imageFile.name.split(".").pop()?.toLowerCase() || "jpg";
+
+    const filePath = `${Date.now()}-${Math.random()
+      .toString(36)
+      .slice(2)}.${extension}`;
+
+    const { error } = await supabase.storage
+      .from("product-images")
+      .upload(filePath, imageFile, {
+        cacheControl: "3600",
+        upsert: false,
+        contentType: imageFile.type,
+      });
+
+    if (error) throw error;
+
+    const { data } = supabase.storage
+      .from("product-images")
+      .getPublicUrl(filePath);
+
+    return data.publicUrl;
+  }
+
+  function resetProductForm() {
+    if (imagePreview.startsWith("blob:")) {
+      URL.revokeObjectURL(imagePreview);
+    }
+
+    setProductForm(emptyProduct);
+    setEditingProduct(null);
+    setImageFile(null);
+    setImagePreview("");
+    setRemoveImage(false);
+  }
+
   // PRODUCT FUNCTIONS
 
   function updateProductField(e) {
@@ -337,26 +476,16 @@ export default function Admin() {
     setError("");
     setMessage("");
 
-    const data = {
-      name: productForm.name.trim(),
-      description: productForm.description.trim(),
-      category: productForm.category,
-      price: Number(productForm.price),
-      stock: Number(productForm.stock),
-      image_url: productForm.image_url.trim(),
-      is_published: editingProduct
-        ? Boolean(
-            products.find((p) => p.id === editingProduct)?.is_published
-          )
-        : false,
-    };
+    const name = productForm.name.trim();
+    const price = Number(productForm.price);
+    const stock = Number(productForm.stock);
 
     if (
-      !data.name ||
-      !Number.isFinite(data.price) ||
-      !Number.isFinite(data.stock) ||
-      data.price < 0 ||
-      data.stock < 0
+      !name ||
+      !Number.isFinite(price) ||
+      !Number.isFinite(stock) ||
+      price < 0 ||
+      stock < 0
     ) {
       setError("Please enter valid product information.");
       return;
@@ -364,35 +493,51 @@ export default function Admin() {
 
     setLoading(true);
 
-    const result = editingProduct
-      ? await supabase
-          .from("products")
-          .update(data)
-          .eq("id", editingProduct)
-      : await supabase.from("products").insert([data]);
+    try {
+      const image_url = await uploadProductImage();
 
-    setLoading(false);
+      const data = {
+        name,
+        description: productForm.description.trim(),
+        category: productForm.category,
+        price,
+        stock,
+        image_url,
+        is_published: editingProduct
+          ? Boolean(
+              products.find((p) => p.id === editingProduct)?.is_published
+            )
+          : false,
+      };
 
-    if (result.error) {
-      setError(result.error.message);
-      return;
+      const result = editingProduct
+        ? await supabase
+            .from("products")
+            .update(data)
+            .eq("id", editingProduct)
+        : await supabase.from("products").insert([data]);
+
+      if (result.error) throw result.error;
+
+      setMessage(
+        editingProduct
+          ? "Product updated successfully."
+          : "Product added as Draft successfully."
+      );
+
+      resetProductForm();
+      await loadProducts();
+    } catch (err) {
+      setError(err.message || "Could not save product.");
     }
 
-    setMessage(
-      editingProduct
-        ? "Product updated successfully."
-        : "Product added as Draft successfully."
-    );
-
-    setProductForm(emptyProduct);
-    setEditingProduct(null);
-
-    await loadProducts();
+    setLoading(false);
   }
 
   function startEditProduct(product) {
-    setEditingProduct(product.id);
+    resetProductForm();
 
+    setEditingProduct(product.id);
     setProductForm({
       name: product.name || "",
       description: product.description || "",
@@ -402,6 +547,9 @@ export default function Admin() {
       image_url: product.image_url || "",
     });
 
+    setImagePreview(product.image_url || "");
+    setRemoveImage(false);
+
     setPage("products");
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
@@ -410,7 +558,7 @@ export default function Admin() {
     setError("");
     setMessage("");
 
-    const nextPublished = !Boolean(product.is_published);
+    const nextPublished = !product.is_published;
 
     const { error } = await supabase
       .from("products")
@@ -520,7 +668,6 @@ export default function Admin() {
 
   function printCurrentLabel() {
     const label = document.getElementById("crs-print-label");
-
     if (!label) return;
 
     const printWindow = window.open("", "_blank", "width=520,height=650");
@@ -583,9 +730,7 @@ export default function Admin() {
         <body>
           ${label.outerHTML}
           <script>
-            window.onload = () => {
-              window.print();
-            };
+            window.onload = () => window.print();
           </script>
         </body>
       </html>
@@ -596,7 +741,6 @@ export default function Admin() {
 
   function downloadPurchaseLabel() {
     const label = document.getElementById("crs-print-label");
-
     if (!label || !selectedPurchase) return;
 
     const html = `
@@ -678,7 +822,464 @@ export default function Admin() {
     await Promise.all([loadPurchases(), loadProducts()]);
   }
 
+  // ==========================================
+  // DIRECT SALE / POS FUNCTIONS
+  // ==========================================
+
+  const filteredSaleProducts = products.filter((product) => {
+    const search = saleSearch.toLowerCase();
+
+    return (
+      product.name?.toLowerCase().includes(search) ||
+      product.category?.toLowerCase().includes(search)
+    );
+  });
+
+  const saleSubtotal = saleCart.reduce(
+    (sum, item) =>
+      sum + Number(item.price || 0) * Number(item.quantity || 0),
+    0
+  );
+
+  function addProductToSale(product) {
+    if (Number(product.stock) <= 0) {
+      setError(`${product.name} is out of stock.`);
+      return;
+    }
+
+    setError("");
+    setMessage("");
+
+    setSaleCart((current) => {
+      const existing = current.find(
+        (item) => item.product_id === product.id
+      );
+
+      if (existing) {
+        if (Number(existing.quantity) + 1 > Number(product.stock)) {
+          setError(`Not enough stock for ${product.name}.`);
+          return current;
+        }
+
+        return current.map((item) =>
+          item.product_id === product.id
+            ? { ...item, quantity: Number(item.quantity) + 1 }
+            : item
+        );
+      }
+
+      return [
+        ...current,
+        {
+          product_id: product.id,
+          name: product.name,
+          price: Number(product.price),
+          quantity: 1,
+          stock: Number(product.stock),
+        },
+      ];
+    });
+  }
+
+  function updateSaleQuantity(productId, value) {
+    const quantity = Number(value);
+
+    if (!Number.isFinite(quantity) || quantity <= 0) return;
+
+    setSaleCart((current) =>
+      current.map((item) => {
+        if (item.product_id !== productId) return item;
+
+        if (quantity > item.stock) {
+          setError(`Available stock: ${item.stock}`);
+          return item;
+        }
+
+        setError("");
+
+        return {
+          ...item,
+          quantity,
+        };
+      })
+    );
+  }
+
+  function removeSaleItem(productId) {
+    setSaleCart((current) =>
+      current.filter((item) => item.product_id !== productId)
+    );
+  }
+
+  function resetSaleForm() {
+    setSaleCart([]);
+    setSaleSearch("");
+    setSaleCustomerName("");
+    setSalePhone("");
+    setSalePayment("Cash");
+  }
+
+  async function createDirectSale(e) {
+    e.preventDefault();
+
+    if (saleCart.length === 0) {
+      setError("Please add at least one product.");
+      return;
+    }
+
+    for (const item of saleCart) {
+      const product = products.find(
+        (p) => p.id === item.product_id
+      );
+
+      if (!product || Number(item.quantity) > Number(product.stock)) {
+        setError(`Insufficient stock for ${item.name}. Please refresh.`);
+        return;
+      }
+    }
+
+    setError("");
+    setMessage("");
+    setSavingSale(true);
+
+    try {
+      const { data, error } = await supabase.rpc(
+        "create_direct_sale",
+        {
+          p_customer_name: saleCustomerName.trim() || "Walk-in Customer",
+          p_phone: salePhone.trim() || null,
+          p_payment_method: salePayment,
+          p_items: saleCart.map((item) => ({
+            product_id: item.product_id,
+            quantity: Number(item.quantity),
+          })),
+        }
+      );
+
+      if (error) throw error;
+
+      const savedSale = {
+        ...data,
+        customer_name: saleCustomerName.trim() || "Walk-in Customer",
+        phone: salePhone.trim() || "",
+        payment_method: salePayment,
+        created_at: new Date().toISOString(),
+      };
+
+      setSelectedSale(savedSale);
+      setMessage(
+        `Invoice ${data.invoice_number} created successfully!`
+      );
+
+      resetSaleForm();
+
+      await Promise.all([loadProducts(), loadSales()]);
+    } catch (err) {
+      setError(err.message || "Could not create invoice.");
+    } finally {
+      setSavingSale(false);
+    }
+  }
+
+  // ==========================================
+  // INVOICE PRINT
+  // ==========================================
+
+  function printSaleInvoice(sale) {
+    if (!sale) return;
+
+    const items = Array.isArray(sale.items) ? sale.items : [];
+
+    const rows = items
+      .map(
+        (item, index) => `
+          <tr>
+            <td>${index + 1}</td>
+            <td>${escapeInvoiceText(item.name || "Product")}</td>
+            <td>${money(item.price)}</td>
+            <td>${Number(item.quantity || 0)}</td>
+            <td>${money(item.line_total)}</td>
+          </tr>
+        `
+      )
+      .join("");
+
+    const invoiceWindow = window.open(
+      "",
+      "_blank",
+      "width=900,height=750"
+    );
+
+    if (!invoiceWindow) {
+      setError("Please allow pop-ups to print the invoice.");
+      return;
+    }
+
+    invoiceWindow.document.write(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="UTF-8">
+        <title>${escapeInvoiceText(sale.invoice_number)}</title>
+        <style>
+          * {
+            box-sizing: border-box;
+          }
+
+          body {
+            font-family: Arial, sans-serif;
+            color: #222;
+            margin: 0;
+            padding: 35px;
+            background: #fff;
+          }
+
+          .invoice {
+            max-width: 850px;
+            margin: auto;
+            border: 1px solid #ddd;
+            padding: 35px;
+          }
+
+          .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            border-bottom: 3px solid #172b4d;
+            padding-bottom: 22px;
+          }
+
+          .brand {
+            font-size: 23px;
+            font-weight: 800;
+            color: #172b4d;
+            letter-spacing: 1px;
+          }
+
+          .brand small {
+            display: block;
+            font-size: 11px;
+            color: #777;
+            margin-top: 7px;
+            letter-spacing: 2px;
+          }
+
+          .invoice-title {
+            font-size: 32px;
+            font-weight: 800;
+            color: #172b4d;
+            text-align: right;
+          }
+
+          .invoice-number {
+            text-align: right;
+            margin-top: 8px;
+            font-size: 13px;
+          }
+
+          .info {
+            display: flex;
+            justify-content: space-between;
+            gap: 25px;
+            margin: 30px 0;
+          }
+
+          .info h3 {
+            font-size: 13px;
+            color: #172b4d;
+            text-transform: uppercase;
+            margin-bottom: 10px;
+          }
+
+          .info p {
+            font-size: 13px;
+            margin: 7px 0;
+          }
+
+          table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+          }
+
+          th {
+            background: #172b4d;
+            color: white;
+            padding: 13px 10px;
+            font-size: 12px;
+            text-align: left;
+          }
+
+          td {
+            border-bottom: 1px solid #ddd;
+            padding: 13px 10px;
+            font-size: 13px;
+          }
+
+          .totals {
+            width: 300px;
+            margin: 25px 0 0 auto;
+          }
+
+          .total-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 9px 0;
+            font-size: 14px;
+          }
+
+          .grand-total {
+            border-top: 2px solid #172b4d;
+            margin-top: 8px;
+            padding-top: 15px;
+            font-size: 19px;
+            font-weight: 800;
+            color: #172b4d;
+          }
+
+          .footer {
+            text-align: center;
+            border-top: 1px solid #ddd;
+            margin-top: 50px;
+            padding-top: 20px;
+            font-size: 12px;
+            color: #777;
+          }
+
+          .signature {
+            display: flex;
+            justify-content: flex-end;
+            margin-top: 55px;
+          }
+
+          .signature div {
+            width: 190px;
+            text-align: center;
+            border-top: 1px solid #444;
+            padding-top: 8px;
+            font-size: 12px;
+          }
+
+          @media print {
+            body {
+              padding: 0;
+            }
+
+            .invoice {
+              border: none;
+              padding: 15px;
+            }
+
+            @page {
+              size: A4;
+              margin: 12mm;
+            }
+          }
+        </style>
+      </head>
+
+      <body>
+        <div class="invoice">
+
+          <div class="header">
+            <div class="brand">
+              CUMILLA RECYCLE SHOP
+              <small>QUALITY RECYCLE PRODUCTS</small>
+            </div>
+
+            <div>
+              <div class="invoice-title">INVOICE</div>
+              <div class="invoice-number">
+                <strong>Invoice:</strong>
+                ${escapeInvoiceText(sale.invoice_number)}
+              </div>
+              <div class="invoice-number">
+                <strong>Date:</strong>
+                ${new Date(sale.created_at || Date.now()).toLocaleDateString("en-BD")}
+              </div>
+            </div>
+          </div>
+
+          <div class="info">
+            <div>
+              <h3>Bill To</h3>
+              <p><strong>${escapeInvoiceText(sale.customer_name || "Walk-in Customer")}</strong></p>
+              <p>Phone: ${escapeInvoiceText(sale.phone || "N/A")}</p>
+            </div>
+
+            <div>
+              <h3>Payment Information</h3>
+              <p>Payment Method: ${escapeInvoiceText(sale.payment_method || "Cash")}</p>
+              <p>Status: Paid</p>
+            </div>
+          </div>
+
+          <table>
+            <thead>
+              <tr>
+                <th>SL</th>
+                <th>Product Description</th>
+                <th>Unit Price</th>
+                <th>Quantity</th>
+                <th>Total</th>
+              </tr>
+            </thead>
+
+            <tbody>
+              ${rows}
+            </tbody>
+          </table>
+
+          <div class="totals">
+            <div class="total-row">
+              <span>Subtotal</span>
+              <strong>${money(sale.subtotal)}</strong>
+            </div>
+
+            <div class="total-row grand-total">
+              <span>Grand Total</span>
+              <strong>${money(sale.total)}</strong>
+            </div>
+          </div>
+
+          <div class="signature">
+            <div>Authorized Signature</div>
+          </div>
+
+          <div class="footer">
+            <strong>Thank you for your business!</strong>
+            <p>CUMILLA RECYCLE SHOP</p>
+          </div>
+
+        </div>
+
+        <script>
+          window.onload = () => window.print();
+        </script>
+      </body>
+      </html>
+    `);
+
+    invoiceWindow.document.close();
+  }
+
+  function escapeInvoiceText(value) {
+    return String(value ?? "").replace(/[&<>"']/g, (char) => ({
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;",
+    })[char]);
+  }
+
+  function printSaleHistoryInvoice(sale) {
+    printSaleInvoice(sale);
+  }
+
+  // ==========================================
   // LOADING SCREEN
+  // ==========================================
 
   if (checking) {
     return (
@@ -688,7 +1289,9 @@ export default function Admin() {
     );
   }
 
+  // ==========================================
   // LOGIN SCREEN
+  // ==========================================
 
   if (!session) {
     return (
@@ -699,9 +1302,7 @@ export default function Admin() {
           </div>
 
           <span className="admin-kicker">ADMINISTRATION</span>
-
           <h1>Welcome back.</h1>
-
           <p>Sign in to manage your online store.</p>
 
           {error && <div className="admin-error">{error}</div>}
@@ -736,7 +1337,9 @@ export default function Admin() {
     );
   }
 
+  // ==========================================
   // ACCESS DENIED
+  // ==========================================
 
   if (!isAdmin) {
     return (
@@ -755,13 +1358,17 @@ export default function Admin() {
     );
   }
 
+  // ==========================================
   // NAVIGATION
+  // ==========================================
 
   const navigation = [
     { id: "dashboard", label: "Overview", icon: "◫" },
     { id: "products", label: "Products", icon: "▦" },
     { id: "purchases", label: "Purchases", icon: "🛒" },
     { id: "orders", label: "Orders", icon: "▤" },
+    { id: "direct-sale", label: "Direct Sale", icon: "🧾" },
+    { id: "sales-history", label: "Sales History", icon: "📊" },
   ];
 
   const purchaseCostPreview =
@@ -773,7 +1380,9 @@ export default function Admin() {
       Number(purchaseForm.buy_price || 0)) *
     Number(purchaseForm.quantity || 0);
 
+  // ==========================================
   // MAIN ADMIN PANEL
+  // ==========================================
 
   return (
     <div className="admin-layout">
@@ -822,7 +1431,11 @@ export default function Admin() {
                 ? "Products"
                 : page === "purchases"
                 ? "Purchases"
-                : "Orders"}
+                : page === "orders"
+                ? "Orders"
+                : page === "direct-sale"
+                ? "Direct Sale"
+                : "Sales History"}
             </h1>
           </div>
 
@@ -846,7 +1459,13 @@ export default function Admin() {
               <div className="admin-stat">
                 <span>Total Orders</span>
                 <strong>{orders.length}</strong>
-                <small>Recorded orders</small>
+                <small>Online orders</small>
+              </div>
+
+              <div className="admin-stat">
+                <span>Total Direct Sales</span>
+                <strong>{sales.length}</strong>
+                <small>Garage sales</small>
               </div>
 
               <div className="admin-stat">
@@ -969,13 +1588,57 @@ export default function Admin() {
                   </div>
                 </div>
 
-                <label>Image URL</label>
-                <input
-                  name="image_url"
-                  value={productForm.image_url}
-                  onChange={updateProductField}
-                  placeholder="https://..."
-                />
+                <div className="crs-image-upload">
+                  <label>Product Image</label>
+
+                  <p>
+                    Choose an image from your device or take a photo.
+                    Maximum size: 5 MB.
+                  </p>
+
+                  <div className="crs-image-buttons">
+                    <label className="admin-secondary-button crs-file-button">
+                      📁 Choose from Gallery
+                      <input
+                        type="file"
+                        accept="image/*"
+                        onChange={handleImageChange}
+                        hidden
+                      />
+                    </label>
+
+                    <label className="admin-secondary-button crs-file-button">
+                      📷 Take Photo
+                      <input
+                        type="file"
+                        accept="image/*"
+                        capture="environment"
+                        onChange={handleImageChange}
+                        hidden
+                      />
+                    </label>
+                  </div>
+
+                  {imagePreview && (
+                    <div className="crs-image-preview">
+                      <img src={imagePreview} alt="Product preview" />
+
+                      <button
+                        type="button"
+                        className="admin-secondary-button"
+                        onClick={clearSelectedImage}
+                      >
+                        Remove Image
+                      </button>
+                    </div>
+                  )}
+
+                  {!imagePreview && (
+                    <div className="crs-image-empty">
+                      No image selected
+                    </div>
+                  )}
+                </div>
 
                 <div className="admin-form-actions">
                   <button
@@ -993,10 +1656,7 @@ export default function Admin() {
                     <button
                       type="button"
                       className="admin-secondary-button"
-                      onClick={() => {
-                        setEditingProduct(null);
-                        setProductForm(emptyProduct);
-                      }}
+                      onClick={resetProductForm}
                     >
                       Cancel
                     </button>
@@ -1025,11 +1685,21 @@ export default function Admin() {
                     {products.map((product) => (
                       <tr key={product.id}>
                         <td>
-                          <strong>{product.name}</strong>
+                          <div className="crs-product-table-cell">
+                            {product.image_url && (
+                              <img
+                                src={product.image_url}
+                                alt={product.name}
+                              />
+                            )}
+                            <strong>{product.name}</strong>
+                          </div>
                         </td>
+
                         <td>{product.category}</td>
                         <td>{money(product.price)}</td>
                         <td>{product.stock}</td>
+
                         <td>
                           <span
                             className={
@@ -1238,15 +1908,11 @@ export default function Admin() {
               </form>
             </section>
 
-            {/* PURCHASE HISTORY */}
-
             <section className="admin-section">
               <div className="admin-section-heading">
                 <div>
                   <h2>Purchase History</h2>
-                  <p>
-                    Every purchase has its own QR and barcode label.
-                  </p>
+                  <p>Every purchase has its own QR and barcode label.</p>
                 </div>
 
                 <button
@@ -1297,9 +1963,7 @@ export default function Admin() {
                           <tr key={item.id}>
                             <td>{item.purchase_date}</td>
                             <td>{item.item_code || "Missing code"}</td>
-                            <td>
-                              <strong>{item.product_name}</strong>
-                            </td>
+                            <td><strong>{item.product_name}</strong></td>
                             <td>{item.category}</td>
                             <td>{money(item.buy_price)}</td>
                             <td>{money(item.selling_price)}</td>
@@ -1350,7 +2014,7 @@ export default function Admin() {
             <div className="admin-section-heading">
               <div>
                 <h2>All Orders</h2>
-                <p>Customer order records</p>
+                <p>Manage customer orders and delivery status</p>
               </div>
 
               <button
@@ -1368,22 +2032,54 @@ export default function Admin() {
                 <table className="admin-table">
                   <thead>
                     <tr>
-                      {Object.keys(orders[0]).map((key) => (
-                        <th key={key}>{key.replaceAll("_", " ")}</th>
-                      ))}
+                      <th>Order ID</th>
+                      <th>Customer</th>
+                      <th>Phone</th>
+                      <th>Total</th>
+                      <th>Status</th>
+                      <th>Order Date</th>
+                      <th>Actions</th>
                     </tr>
                   </thead>
 
                   <tbody>
-                    {orders.map((order, index) => (
-                      <tr key={order.id || index}>
-                        {Object.keys(order).map((key) => (
-                          <td key={key}>
-                            {typeof order[key] === "object"
-                              ? JSON.stringify(order[key])
-                              : String(order[key] ?? "")}
-                          </td>
-                        ))}
+                    {orders.map((order) => (
+                      <tr key={order.id}>
+                        <td>#{order.id}</td>
+                        <td>{order.customer_name}</td>
+                        <td>{order.phone}</td>
+                        <td>{money(order.total)}</td>
+
+                        <td>
+                          <select
+                            value={order.status || "Pending"}
+                            disabled={updatingOrderId === order.id}
+                            onChange={(e) =>
+                              updateOrderStatus(order.id, e.target.value)
+                            }
+                          >
+                            <option value="Pending">Pending</option>
+                            <option value="Confirmed">Confirmed</option>
+                            <option value="Processing">Processing</option>
+                            <option value="Shipped">Shipped</option>
+                            <option value="Delivered">Delivered</option>
+                          </select>
+                        </td>
+
+                        <td>
+                          {order.created_at
+                            ? new Date(order.created_at).toLocaleString("en-BD")
+                            : "N/A"}
+                        </td>
+
+                        <td>
+                          <button
+                            className="admin-secondary-button"
+                            onClick={() => setSelectedOrder(order)}
+                          >
+                            View Details
+                          </button>
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -1391,6 +2087,410 @@ export default function Admin() {
               </div>
             )}
           </section>
+        )}
+
+        {/* DIRECT SALE */}
+
+        {page === "direct-sale" && (
+          <>
+            <section className="admin-section">
+              <div className="admin-section-heading">
+                <div>
+                  <h2>Create New Invoice</h2>
+                  <p>Garage counter sale — fixed product selling prices</p>
+                </div>
+              </div>
+
+              <form onSubmit={createDirectSale}>
+                <div className="admin-form-row">
+                  <div>
+                    <label>Customer Name (Optional)</label>
+                    <input
+                      value={saleCustomerName}
+                      onChange={(e) => setSaleCustomerName(e.target.value)}
+                      placeholder="Walk-in Customer"
+                    />
+                  </div>
+
+                  <div>
+                    <label>Phone Number (Optional)</label>
+                    <input
+                      value={salePhone}
+                      onChange={(e) => setSalePhone(e.target.value)}
+                      placeholder="01XXXXXXXXX"
+                    />
+                  </div>
+                </div>
+
+                <label>Payment Method</label>
+                <select
+                  value={salePayment}
+                  onChange={(e) => setSalePayment(e.target.value)}
+                >
+                  <option value="Cash">Cash</option>
+                  <option value="bKash">bKash</option>
+                  <option value="Nagad">Nagad</option>
+                  <option value="Bank">Bank</option>
+                </select>
+
+                <hr />
+
+                <h3>Add Products</h3>
+
+                <input
+                  value={saleSearch}
+                  onChange={(e) => setSaleSearch(e.target.value)}
+                  placeholder="Search product name..."
+                />
+
+                <div className="admin-table-wrap">
+                  <table className="admin-table">
+                    <thead>
+                      <tr>
+                        <th>Product</th>
+                        <th>Price</th>
+                        <th>Stock</th>
+                        <th>Action</th>
+                      </tr>
+                    </thead>
+
+                    <tbody>
+                      {filteredSaleProducts.map((product) => (
+                        <tr key={product.id}>
+                          <td>{product.name}</td>
+                          <td>{money(product.price)}</td>
+                          <td>{product.stock}</td>
+                          <td>
+                            <button
+                              type="button"
+                              className="admin-primary-button"
+                              disabled={Number(product.stock) <= 0}
+                              onClick={() => addProductToSale(product)}
+                            >
+                              + Add
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+
+                      {filteredSaleProducts.length === 0 && (
+                        <tr>
+                          <td colSpan="4">No products found.</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+
+                <hr />
+
+                <h3>Invoice Items</h3>
+
+                {saleCart.length === 0 ? (
+                  <p>No products added yet.</p>
+                ) : (
+                  <div className="admin-table-wrap">
+                    <table className="admin-table">
+                      <thead>
+                        <tr>
+                          <th>Product</th>
+                          <th>Fixed Price</th>
+                          <th>Quantity</th>
+                          <th>Total</th>
+                          <th>Action</th>
+                        </tr>
+                      </thead>
+
+                      <tbody>
+                        {saleCart.map((item) => (
+                          <tr key={item.product_id}>
+                            <td>{item.name}</td>
+                            <td>{money(item.price)}</td>
+                            <td>
+                              <input
+                                type="number"
+                                min="0.001"
+                                step="0.001"
+                                max={item.stock}
+                                value={item.quantity}
+                                onChange={(e) =>
+                                  updateSaleQuantity(
+                                    item.product_id,
+                                    e.target.value
+                                  )
+                                }
+                                style={{ width: "90px" }}
+                              />
+                              <small> Max: {item.stock}</small>
+                            </td>
+                            <td>
+                              {money(item.price * item.quantity)}
+                            </td>
+                            <td>
+                              <button
+                                type="button"
+                                className="admin-secondary-button"
+                                onClick={() =>
+                                  removeSaleItem(item.product_id)
+                                }
+                              >
+                                Remove
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                <div className="admin-stat-grid">
+                  <div className="admin-stat">
+                    <span>Total Items</span>
+                    <strong>{saleCart.length}</strong>
+                  </div>
+
+                  <div className="admin-stat">
+                    <span>Grand Total</span>
+                    <strong>{money(saleSubtotal)}</strong>
+                  </div>
+                </div>
+
+                <div className="admin-form-actions">
+                  <button
+                    type="submit"
+                    className="admin-primary-button"
+                    disabled={savingSale || saleCart.length === 0}
+                  >
+                    {savingSale ? "Creating Invoice..." : "Create Invoice"}
+                  </button>
+
+                  <button
+                    type="button"
+                    className="admin-secondary-button"
+                    onClick={resetSaleForm}
+                    disabled={savingSale}
+                  >
+                    Clear
+                  </button>
+                </div>
+              </form>
+            </section>
+          </>
+        )}
+
+        {/* SALES HISTORY */}
+
+        {page === "sales-history" && (
+          <section className="admin-section">
+            <div className="admin-section-heading">
+              <div>
+                <h2>Direct Sales History</h2>
+                <p>All garage counter sales and invoices</p>
+              </div>
+
+              <button
+                className="admin-secondary-button"
+                onClick={loadSales}
+              >
+                Refresh
+              </button>
+            </div>
+
+            <div className="admin-stat-grid">
+              <div className="admin-stat">
+                <span>Total Invoices</span>
+                <strong>{sales.length}</strong>
+              </div>
+
+              <div className="admin-stat">
+                <span>Total Direct Sale Revenue</span>
+                <strong>
+                  {money(
+                    sales.reduce(
+                      (sum, sale) => sum + Number(sale.total || 0),
+                      0
+                    )
+                  )}
+                </strong>
+              </div>
+            </div>
+
+            {sales.length === 0 ? (
+              <p>No direct sales yet.</p>
+            ) : (
+              <div className="admin-table-wrap">
+                <table className="admin-table">
+                  <thead>
+                    <tr>
+                      <th>Invoice No.</th>
+                      <th>Customer</th>
+                      <th>Phone</th>
+                      <th>Payment</th>
+                      <th>Total</th>
+                      <th>Date</th>
+                      <th>Action</th>
+                    </tr>
+                  </thead>
+
+                  <tbody>
+                    {sales.map((sale) => (
+                      <tr key={sale.id}>
+                        <td>{sale.invoice_number}</td>
+                        <td>{sale.customer_name}</td>
+                        <td>{sale.phone || "N/A"}</td>
+                        <td>{sale.payment_method}</td>
+                        <td>{money(sale.total)}</td>
+                        <td>
+                          {new Date(sale.created_at).toLocaleDateString("en-BD")}
+                        </td>
+                        <td>
+                          <button
+                            className="admin-primary-button"
+                            onClick={() => printSaleHistoryInvoice(sale)}
+                          >
+                            Print Invoice
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+        )}
+
+        {/* ORDER DETAILS MODAL */}
+
+        {selectedOrder && (
+          <div
+            className="crs-modal-backdrop"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) setSelectedOrder(null);
+            }}
+          >
+            <div className="crs-modal">
+              <div className="admin-section-heading">
+                <div>
+                  <h2>Order #{selectedOrder.id}</h2>
+                  <p>Complete customer order information</p>
+                </div>
+
+                <button
+                  className="admin-secondary-button"
+                  onClick={() => setSelectedOrder(null)}
+                >
+                  Close
+                </button>
+              </div>
+
+              <h3>Customer Information</h3>
+
+              <p><strong>Name:</strong> {selectedOrder.customer_name}</p>
+              <p><strong>Phone:</strong> {selectedOrder.phone}</p>
+              <p><strong>Email:</strong> {selectedOrder.email || "Not provided"}</p>
+              <p><strong>District:</strong> {selectedOrder.district}</p>
+              <p><strong>Address:</strong> {selectedOrder.address}</p>
+              <p><strong>Payment:</strong> {selectedOrder.payment_method}</p>
+
+              <hr />
+
+              <h3>Ordered Products</h3>
+
+              {Array.isArray(selectedOrder.items) &&
+              selectedOrder.items.length > 0 ? (
+                <div className="admin-table-wrap">
+                  <table className="admin-table">
+                    <thead>
+                      <tr>
+                        <th>Product</th>
+                        <th>Price</th>
+                        <th>Quantity</th>
+                        <th>Total</th>
+                      </tr>
+                    </thead>
+
+                    <tbody>
+                      {selectedOrder.items.map((item, index) => (
+                        <tr key={item.product_id || index}>
+                          <td>{item.name || "Product"}</td>
+                          <td>{money(item.price)}</td>
+                          <td>{item.quantity}</td>
+                          <td>
+                            {money(
+                              item.line_total ??
+                                Number(item.price || 0) *
+                                  Number(item.quantity || 0)
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p>No product details available.</p>
+              )}
+
+              <hr />
+
+              <p><strong>Subtotal:</strong> {money(selectedOrder.subtotal)}</p>
+              <p><strong>Delivery:</strong> {money(selectedOrder.delivery_charge)}</p>
+              <h3>Grand Total: {money(selectedOrder.total)}</h3>
+
+              <p><strong>Current Status:</strong> {selectedOrder.status}</p>
+
+              <label>Update Order Status</label>
+              <select
+                value={selectedOrder.status || "Pending"}
+                disabled={updatingOrderId === selectedOrder.id}
+                onChange={(e) =>
+                  updateOrderStatus(selectedOrder.id, e.target.value)
+                }
+              >
+                <option value="Pending">Pending</option>
+                <option value="Confirmed">Confirmed</option>
+                <option value="Processing">Processing</option>
+                <option value="Shipped">Shipped</option>
+                <option value="Delivered">Delivered</option>
+              </select>
+            </div>
+          </div>
+        )}
+
+        {/* SUCCESSFUL INVOICE MODAL */}
+
+        {selectedSale && (
+          <div className="crs-modal-backdrop">
+            <div className="crs-modal">
+              <div className="admin-section-heading">
+                <div>
+                  <h2>Invoice Created!</h2>
+                  <p>{selectedSale.invoice_number}</p>
+                </div>
+
+                <button
+                  className="admin-secondary-button"
+                  onClick={() => setSelectedSale(null)}
+                >
+                  Close
+                </button>
+              </div>
+
+              <h3>CUMILLA RECYCLE SHOP</h3>
+              <h2>{money(selectedSale.total)}</h2>
+              <p>Customer: {selectedSale.customer_name}</p>
+              <p>Payment: {selectedSale.payment_method}</p>
+
+              <button
+                className="admin-primary-button"
+                onClick={() => printSaleInvoice(selectedSale)}
+              >
+                🖨 Print / Save PDF
+              </button>
+            </div>
+          </div>
         )}
 
         {loading && (

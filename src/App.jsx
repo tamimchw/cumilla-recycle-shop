@@ -1,3 +1,4 @@
+
 import { useEffect, useMemo, useState } from "react";
 import Admin from "./Admin";
 import { supabase } from "./supabase";
@@ -16,12 +17,13 @@ function App() {
 
   const [cart, setCart] = useState([]);
   const [cartOpen, setCartOpen] = useState(false);
-
   const [selectedProduct, setSelectedProduct] = useState(null);
 
   const [checkoutOpen, setCheckoutOpen] = useState(false);
   const [orderPlaced, setOrderPlaced] = useState(false);
   const [orderInfo, setOrderInfo] = useState(null);
+  const [orderSubmitting, setOrderSubmitting] = useState(false);
+  const [orderError, setOrderError] = useState("");
 
   // Load published products from Supabase
   useEffect(() => {
@@ -39,14 +41,14 @@ function App() {
         console.error("Product loading error:", error);
         setProductError(error.message);
       } else {
-        const formattedProducts = (data || []).map((product) => ({
-          ...product,
-          image: product.image_url,
-          oldPrice: 0,
-          tag: "NEW",
-        }));
-
-        setProducts(formattedProducts);
+        setProducts(
+          (data || []).map((product) => ({
+            ...product,
+            image: product.image_url,
+            oldPrice: 0,
+            tag: "NEW",
+          }))
+        );
       }
 
       setLoadingProducts(false);
@@ -142,29 +144,104 @@ function App() {
 
   const total = subtotal + delivery;
 
-  // Demo order submission
-  const handleOrder = (e) => {
+  // Real order submission through the secure Edge Function
+  const handleOrder = async (e) => {
     e.preventDefault();
+    setOrderError("");
+
+    if (orderSubmitting) return;
 
     if (cart.length === 0) {
-      alert("Your shopping bag is empty.");
+      setOrderError("Your shopping bag is empty.");
       return;
     }
 
     const formData = new FormData(e.currentTarget);
 
-    setOrderInfo({
-      name: formData.get("name"),
-      phone: formData.get("phone"),
-      email: formData.get("email"),
-      district: formData.get("district"),
-      address: formData.get("address"),
-      items: totalItems,
-      total: total,
-    });
+    const orderPayload = {
+      name: String(formData.get("name") || "").trim(),
+      phone: String(formData.get("phone") || "").trim(),
+      email: String(formData.get("email") || "").trim(),
+      district: String(formData.get("district") || "").trim(),
+      address: String(formData.get("address") || "").trim(),
+      payment: String(
+        formData.get("payment") || "Cash on Delivery"
+      ),
+      items: cart.map((item) => ({
+        product_id: Number(item.id),
+        quantity: Number(item.quantity),
+      })),
+    };
 
-    setOrderPlaced(true);
-    setCart([]);
+    setOrderSubmitting(true);
+
+    try {
+      const { data, error } = await supabase.functions.invoke(
+        "order-notification",
+        { body: orderPayload }
+      );
+
+      if (error) {
+        let message =
+          error.message || "Could not submit your order.";
+
+        try {
+          const details = await error.context?.json?.();
+          if (details?.error) message = details.error;
+        } catch {
+          // Keep original error message.
+        }
+
+        throw new Error(message);
+      }
+
+      if (!data?.success || !data?.orderId) {
+        throw new Error(
+          data?.error ||
+          "Order could not be confirmed. Please try again."
+        );
+      }
+
+      setOrderInfo({
+        orderId: data.orderId,
+        name: orderPayload.name,
+        phone: orderPayload.phone,
+        district: orderPayload.district,
+        items: totalItems,
+        total: Number(data.total ?? total),
+        emailSent: Boolean(data.emailSent),
+      });
+
+      // Update visible stock after successful order.
+      setProducts((current) =>
+        current.map((product) => {
+          const ordered = cart.find(
+            (item) => item.id === product.id
+          );
+
+          return ordered
+            ? {
+                ...product,
+                stock: Math.max(
+                  0,
+                  Number(product.stock) -
+                    Number(ordered.quantity)
+                ),
+              }
+            : product;
+        })
+      );
+
+      setOrderPlaced(true);
+      setCart([]);
+    } catch (error) {
+      console.error("Order submission error:", error);
+      setOrderError(
+        error.message || "Something went wrong. Please try again."
+      );
+    } finally {
+      setOrderSubmitting(false);
+    }
   };
 
   // Admin route
@@ -603,6 +680,7 @@ function App() {
                     onClick={() => {
                       setCartOpen(false);
                       setCheckoutOpen(true);
+                      setOrderError("");
                     }}
                   >
                     Continue to Checkout →
@@ -637,6 +715,7 @@ function App() {
                   <button
                     className="modal-close"
                     onClick={() => setCheckoutOpen(false)}
+                    disabled={orderSubmitting}
                   >
                     ✕
                   </button>
@@ -646,6 +725,12 @@ function App() {
                   className="checkout-form"
                   onSubmit={handleOrder}
                 >
+                  {orderError && (
+                    <div className="admin-error" role="alert">
+                      {orderError}
+                    </div>
+                  )}
+
                   <h3>01. Contact Information</h3>
 
                   <label>Full Name *</label>
@@ -718,13 +803,17 @@ function App() {
                   <button
                     className="checkout-button"
                     type="submit"
+                    disabled={orderSubmitting}
                   >
-                    Place Order →
+                    {orderSubmitting
+                      ? "Placing Order..."
+                      : "Place Order →"}
                   </button>
 
                   <button
                     type="button"
                     className="back-button"
+                    disabled={orderSubmitting}
                     onClick={() => {
                       setCheckoutOpen(false);
                       setCartOpen(true);
@@ -748,13 +837,26 @@ function App() {
                 </h2>
 
                 <p>
-                  Your demo order has been submitted.
+                  Your order has been submitted successfully.
+                  We will contact you soon.
                 </p>
+
+                {orderInfo?.emailSent === false && (
+                  <p>
+                    Your order was saved, but the store notification
+                    email could not be sent.
+                  </p>
+                )}
 
                 <div className="success-details">
                   <div>
+                    <span>Order ID</span>
+                    <strong>CRS-{orderInfo?.orderId}</strong>
+                  </div>
+
+                  <div>
                     <span>Order Status</span>
-                    <strong>Demo Confirmation</strong>
+                    <strong>Pending</strong>
                   </div>
 
                   <div>
@@ -789,6 +891,7 @@ function App() {
                     setCheckoutOpen(false);
                     setOrderPlaced(false);
                     setOrderInfo(null);
+                    setOrderError("");
                   }}
                 >
                   Continue Shopping →
