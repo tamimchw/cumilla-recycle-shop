@@ -1,4 +1,3 @@
-
 import { useEffect, useMemo, useState } from "react";
 import QRCode from "qrcode";
 import Barcode from "react-barcode";
@@ -21,6 +20,7 @@ const emptyProduct = {
   category: "Plastic",
   price: "",
   stock: "",
+  barcode: "",
   image_url: "",
 };
 
@@ -46,12 +46,15 @@ export default function Admin() {
   const [sales, setSales] = useState([]);
 
   const [saleCart, setSaleCart] = useState([]);
-  const [saleSearch, setSaleSearch] = useState("");
+  const [saleBarcodeInput, setSaleBarcodeInput] = useState("");
+  const [saleBarcodeMessage, setSaleBarcodeMessage] = useState("");
+  const [saleCameraOpen, setSaleCameraOpen] = useState(false);
   const [saleCustomerName, setSaleCustomerName] = useState("");
   const [salePhone, setSalePhone] = useState("");
   const [salePayment, setSalePayment] = useState("Cash");
   const [savingSale, setSavingSale] = useState(false);
   const [selectedSale, setSelectedSale] = useState(null);
+  const [selectedBarcodeProduct, setSelectedBarcodeProduct] = useState(null);
 
   const [selectedOrder, setSelectedOrder] = useState(null);
   const [updatingOrderId, setUpdatingOrderId] = useState(null);
@@ -163,6 +166,7 @@ export default function Admin() {
     setPage("dashboard");
     setSelectedPurchase(null);
     setScannerOpen(false);
+    setSaleCameraOpen(false);
   }
 
   // LOAD DATA
@@ -297,7 +301,7 @@ export default function Admin() {
     };
   }, [selectedPurchase]);
 
-  // CAMERA SCANNER
+  // PURCHASE CAMERA SCANNER
 
   useEffect(() => {
     if (!scannerOpen || !isAdmin) return;
@@ -357,6 +361,61 @@ export default function Admin() {
     };
   }, [scannerOpen, isAdmin]);
 
+  // DIRECT SALE BARCODE CAMERA SCANNER
+
+  useEffect(() => {
+    if (!saleCameraOpen || !isAdmin) return;
+
+    const scanner = new Html5QrcodeScanner(
+      "crs-sale-barcode-camera",
+      {
+        fps: 10,
+        qrbox: { width: 280, height: 140 },
+        formatsToSupport: [
+          Html5QrcodeSupportedFormats.CODE_128,
+          Html5QrcodeSupportedFormats.CODE_39,
+          Html5QrcodeSupportedFormats.EAN_13,
+          Html5QrcodeSupportedFormats.EAN_8,
+          Html5QrcodeSupportedFormats.UPC_A,
+          Html5QrcodeSupportedFormats.UPC_E,
+        ],
+      },
+      false
+    );
+
+    let handled = false;
+
+    scanner.render(
+      (decodedText) => {
+        if (handled) return;
+
+        handled = true;
+        const code = decodedText.trim();
+
+        const product = products.find(
+          (item) => String(item.barcode || "").trim() === code
+        );
+
+        if (!product) {
+          setSaleBarcodeMessage(
+            `Barcode ${code} was not found in Products.`
+          );
+          handled = false;
+          return;
+        }
+
+        addProductToSale(product);
+        setSaleBarcodeMessage(`${product.name} added to invoice.`);
+        setSaleCameraOpen(false);
+      },
+      () => {}
+    );
+
+    return () => {
+      scanner.clear().catch(() => {});
+    };
+  }, [saleCameraOpen, isAdmin, products]);
+
   // DASHBOARD CALCULATIONS
 
   const inventoryValue = useMemo(
@@ -385,6 +444,16 @@ export default function Admin() {
         { cost: 0, expectedProfit: 0 }
       ),
     [purchases]
+  );
+
+  const totalSalesRevenue = useMemo(
+    () => sales.reduce((sum, sale) => sum + Number(sale.total || 0), 0),
+    [sales]
+  );
+
+  const lowStockProducts = useMemo(
+    () => products.filter((product) => Number(product.stock || 0) <= 5),
+    [products]
   );
 
   // PRODUCT IMAGE FUNCTIONS
@@ -502,6 +571,7 @@ export default function Admin() {
         category: productForm.category,
         price,
         stock,
+        barcode: productForm.barcode.trim() || null,
         image_url,
         is_published: editingProduct
           ? Boolean(
@@ -544,6 +614,7 @@ export default function Admin() {
       category: product.category || "Plastic",
       price: String(product.price ?? ""),
       stock: String(product.stock ?? ""),
+      barcode: product.barcode || "",
       image_url: product.image_url || "",
     });
 
@@ -660,6 +731,55 @@ export default function Admin() {
     setEditingPurchase(null);
 
     await Promise.all([loadPurchases(), loadProducts()]);
+  }
+
+  function printProductBarcodeLabel(product) {
+    if (!product?.barcode) {
+      setError(
+        "This product does not have a barcode yet. Edit the product and add or generate one first."
+      );
+      return;
+    }
+
+    setSelectedBarcodeProduct(product);
+  }
+
+  function printCurrentProductBarcodeLabel() {
+    const label = document.getElementById("crs-product-print-label");
+    if (!label || !selectedBarcodeProduct) return;
+
+    const printWindow = window.open("", "_blank", "width=520,height=420");
+
+    if (!printWindow) {
+      setError("Please allow pop-ups to print the barcode label.");
+      return;
+    }
+
+    printWindow.document.write(`
+      <!doctype html>
+      <html>
+        <head>
+          <meta charset="utf-8">
+          <title>Product Barcode Label</title>
+          <style>
+            * { box-sizing: border-box; }
+            body { font-family: Arial, sans-serif; margin: 0; padding: 8mm; text-align: center; }
+            .crs-product-print-label { width: 70mm; margin: 0 auto; padding: 5mm; text-align: center; border: 1px solid #ddd; }
+            .crs-product-print-brand { font-size: 11px; font-weight: 800; letter-spacing: 1px; }
+            .crs-product-print-name { font-size: 13px; font-weight: 700; margin: 7px 0; }
+            .crs-product-print-code { font-size: 10px; margin-top: 4px; }
+            svg { max-width: 100%; height: auto; }
+            @media print { @page { size: 80mm 50mm; margin: 2mm; } .crs-product-print-label { border: 0; width: 100%; } }
+          </style>
+        </head>
+        <body>
+          ${label.outerHTML}
+          <script>window.onload = () => window.print();</script>
+        </body>
+      </html>
+    `);
+
+    printWindow.document.close();
   }
 
   function printPurchaseLabel(item) {
@@ -822,18 +942,39 @@ export default function Admin() {
     await Promise.all([loadPurchases(), loadProducts()]);
   }
 
-  // ==========================================
   // DIRECT SALE / POS FUNCTIONS
-  // ==========================================
 
-  const filteredSaleProducts = products.filter((product) => {
-    const search = saleSearch.toLowerCase();
+  function handleSaleBarcodeSubmit(e) {
+    e.preventDefault();
 
-    return (
-      product.name?.toLowerCase().includes(search) ||
-      product.category?.toLowerCase().includes(search)
+    const code = saleBarcodeInput.trim();
+    if (!code) return;
+
+    const product = products.find(
+      (item) => String(item.barcode || "").trim() === code
     );
-  });
+
+    if (!product) {
+      setSaleBarcodeMessage(
+        `Barcode ${code} was not found. Check the product barcode.`
+      );
+      setSaleBarcodeInput("");
+      return;
+    }
+
+    addProductToSale(product);
+    setSaleBarcodeMessage(`${product.name} added to invoice.`);
+    setSaleBarcodeInput("");
+  }
+
+  function generateProductBarcode() {
+    const code = `CRS${Date.now()}`;
+    setProductForm((current) => ({
+      ...current,
+      barcode: code,
+    }));
+  }
+
 
   const saleSubtotal = saleCart.reduce(
     (sum, item) =>
@@ -913,7 +1054,8 @@ export default function Admin() {
 
   function resetSaleForm() {
     setSaleCart([]);
-    setSaleSearch("");
+    setSaleBarcodeInput("");
+    setSaleBarcodeMessage("");
     setSaleCustomerName("");
     setSalePhone("");
     setSalePayment("Cash");
@@ -981,9 +1123,7 @@ export default function Admin() {
     }
   }
 
-  // ==========================================
   // INVOICE PRINT
-  // ==========================================
 
   function printSaleInvoice(sale) {
     if (!sale) return;
@@ -1277,9 +1417,7 @@ export default function Admin() {
     printSaleInvoice(sale);
   }
 
-  // ==========================================
   // LOADING SCREEN
-  // ==========================================
 
   if (checking) {
     return (
@@ -1289,9 +1427,7 @@ export default function Admin() {
     );
   }
 
-  // ==========================================
   // LOGIN SCREEN
-  // ==========================================
 
   if (!session) {
     return (
@@ -1337,9 +1473,7 @@ export default function Admin() {
     );
   }
 
-  // ==========================================
   // ACCESS DENIED
-  // ==========================================
 
   if (!isAdmin) {
     return (
@@ -1358,9 +1492,7 @@ export default function Admin() {
     );
   }
 
-  // ==========================================
   // NAVIGATION
-  // ==========================================
 
   const navigation = [
     { id: "dashboard", label: "Overview", icon: "◫" },
@@ -1380,9 +1512,7 @@ export default function Admin() {
       Number(purchaseForm.buy_price || 0)) *
     Number(purchaseForm.quantity || 0);
 
-  // ==========================================
   // MAIN ADMIN PANEL
-  // ==========================================
 
   return (
     <div className="admin-layout">
@@ -1444,66 +1574,86 @@ export default function Admin() {
 
         {error && <div className="admin-error">{error}</div>}
         {message && <div className="admin-message">{message}</div>}
-
-        {/* DASHBOARD */}
+                {/* DASHBOARD */}
 
         {page === "dashboard" && (
           <>
+            <section
+              style={{
+                background: "linear-gradient(135deg, #142b45 0%, #244d70 100%)",
+                color: "#fff",
+                borderRadius: "18px",
+                padding: "26px",
+                marginBottom: "22px",
+                boxShadow: "0 12px 30px rgba(20,43,69,.14)",
+              }}
+            >
+              <div style={{ display: "flex", justifyContent: "space-between", gap: "16px", flexWrap: "wrap", alignItems: "center" }}>
+                <div>
+                  <span style={{ fontSize: "11px", letterSpacing: "2px", opacity: .75 }}>BUSINESS OVERVIEW</span>
+                  <h2 style={{ color: "#fff", margin: "8px 0", fontSize: "26px" }}>Welcome to your control center</h2>
+                  <p style={{ color: "rgba(255,255,255,.75)", margin: 0 }}>Monitor inventory, orders and counter sales in one place.</p>
+                </div>
+                <button className="admin-primary-button" onClick={() => setPage("direct-sale")} style={{ background: "#fff", color: "#17324f" }}>
+                  + New Direct Sale
+                </button>
+              </div>
+            </section>
+
             <section className="admin-stat-grid">
-              <div className="admin-stat">
-                <span>Total Products</span>
-                <strong>{products.length}</strong>
-                <small>Products in database</small>
-              </div>
-
-              <div className="admin-stat">
-                <span>Total Orders</span>
-                <strong>{orders.length}</strong>
-                <small>Online orders</small>
-              </div>
-
-              <div className="admin-stat">
-                <span>Total Direct Sales</span>
-                <strong>{sales.length}</strong>
-                <small>Garage sales</small>
-              </div>
-
-              <div className="admin-stat">
-                <span>Inventory Value</span>
-                <strong>{money(inventoryValue)}</strong>
-                <small>Based on selling price × stock</small>
-              </div>
-
-              <div className="admin-stat">
-                <span>Total Purchase Cost</span>
-                <strong>{money(purchaseTotals.cost)}</strong>
-                <small>Purchase records</small>
-              </div>
+              <div className="admin-stat"><span>Products</span><strong>{products.length}</strong><small>All inventory items</small></div>
+              <div className="admin-stat"><span>Online Orders</span><strong>{orders.length}</strong><small>Orders received</small></div>
+              <div className="admin-stat"><span>Direct Invoices</span><strong>{sales.length}</strong><small>Counter transactions</small></div>
+              <div className="admin-stat"><span>Sales Revenue</span><strong>{money(totalSalesRevenue)}</strong><small>Direct sale invoices</small></div>
+              <div className="admin-stat"><span>Inventory Value</span><strong>{money(inventoryValue)}</strong><small>Selling price × current stock</small></div>
+              <div className="admin-stat"><span>Purchase Cost</span><strong>{money(purchaseTotals.cost)}</strong><small>Recorded purchase value</small></div>
             </section>
 
             <section className="admin-section">
               <div className="admin-section-heading">
-                <div>
-                  <h2>Recent Products</h2>
-                  <p>Your latest store inventory</p>
-                </div>
-
-                <button
-                  className="admin-primary-button"
-                  onClick={() => setPage("products")}
-                >
-                  + Manage Products
-                </button>
+                <div><h2>Inventory Health</h2><p>Quick view of products that may need attention</p></div>
+                <button className="admin-secondary-button" onClick={() => setPage("products")}>Manage Products</button>
               </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: "14px" }}>
+                <div style={{ padding: "18px", borderRadius: "12px", background: "#f0fdf4", border: "1px solid #bbf7d0" }}>
+                  <span style={{ color: "#166534", fontSize: "13px" }}>Published Products</span>
+                  <h2 style={{ color: "#166534", margin: "8px 0 0" }}>{products.filter((p) => p.is_published).length}</h2>
+                </div>
+                <div style={{ padding: "18px", borderRadius: "12px", background: "#fff7ed", border: "1px solid #fed7aa" }}>
+                  <span style={{ color: "#9a3412", fontSize: "13px" }}>Low Stock (5 or less)</span>
+                  <h2 style={{ color: "#9a3412", margin: "8px 0 0" }}>{lowStockProducts.length}</h2>
+                </div>
+                <div style={{ padding: "18px", borderRadius: "12px", background: "#eff6ff", border: "1px solid #bfdbfe" }}>
+                  <span style={{ color: "#1d4ed8", fontSize: "13px" }}>Draft Products</span>
+                  <h2 style={{ color: "#1d4ed8", margin: "8px 0 0" }}>{products.filter((p) => !p.is_published).length}</h2>
+                </div>
+              </div>
+              {lowStockProducts.length > 0 ? (
+                <div style={{ marginTop: "20px" }}>
+                  <h3>Products needing restock</h3>
+                  {lowStockProducts.slice(0, 6).map((product) => (
+                    <div className="admin-list-row" key={product.id}>
+                      <strong>{product.name}</strong><span>{money(product.price)}</span>
+                      <span style={{ color: Number(product.stock) === 0 ? "#dc2626" : "#b45309", fontWeight: 700 }}>
+                        {Number(product.stock) === 0 ? "Out of stock" : `Only ${product.stock} left`}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              ) : <p style={{ marginTop: "18px", color: "#15803d" }}>All products currently have more than 5 units in stock.</p>}
+            </section>
 
+            <section className="admin-section">
+              <div className="admin-section-heading">
+                <div><h2>Recent Products</h2><p>Your latest store inventory</p></div>
+                <button className="admin-secondary-button" onClick={() => setPage("products")}>View All Products</button>
+              </div>
               {products.slice(0, 5).map((product) => (
                 <div className="admin-list-row" key={product.id}>
                   <strong>{product.name}</strong>
                   <span>{money(product.price)}</span>
                   <span>Stock: {product.stock}</span>
-                  <span>
-                    {product.is_published ? "Published" : "Draft"}
-                  </span>
+                  <span>{product.is_published ? "Published" : "Draft"}</span>
                 </div>
               ))}
             </section>
@@ -1534,6 +1684,39 @@ export default function Admin() {
                   onChange={updateProductField}
                   required
                 />
+
+                <label>Product Barcode</label>
+                <div className="admin-form-row">
+                  <div>
+                    <input
+                      name="barcode"
+                      type="text"
+                      value={productForm.barcode}
+                      onChange={updateProductField}
+                      placeholder="Scan or enter barcode"
+                    />
+                  </div>
+
+                  <div>
+                    <button
+                      type="button"
+                      className="admin-secondary-button"
+                      onClick={generateProductBarcode}
+                    >
+                      Generate Barcode
+                    </button>
+                  </div>
+                </div>
+
+                {productForm.barcode && (
+                  <div style={{ padding: "10px 0", overflowX: "auto" }}>
+                    <Barcode
+                      value={productForm.barcode}
+                      format="CODE128"
+                      height={55}
+                    />
+                  </div>
+                )}
 
                 <label>Description</label>
                 <textarea
@@ -1673,6 +1856,7 @@ export default function Admin() {
                   <thead>
                     <tr>
                       <th>Product</th>
+                      <th>Barcode</th>
                       <th>Category</th>
                       <th>Price</th>
                       <th>Stock</th>
@@ -1696,6 +1880,23 @@ export default function Admin() {
                           </div>
                         </td>
 
+                        <td>
+                          {product.barcode ? (
+                            <div style={{ minWidth: "150px" }}>
+                              <small>{product.barcode}</small>
+                              <Barcode
+                                value={product.barcode}
+                                format="CODE128"
+                                height={35}
+                                width={1.2}
+                                fontSize={9}
+                              />
+                            </div>
+                          ) : (
+                            "Not set"
+                          )}
+                        </td>
+
                         <td>{product.category}</td>
                         <td>{money(product.price)}</td>
                         <td>{product.stock}</td>
@@ -1714,6 +1915,14 @@ export default function Admin() {
 
                         <td>
                           <div className="admin-actions">
+                            <button
+                              type="button"
+                              disabled={!product.barcode}
+                              onClick={() => printProductBarcodeLabel(product)}
+                            >
+                              Print Barcode
+                            </button>
+
                             <button
                               onClick={() =>
                                 toggleProductPublished(product)
@@ -1744,8 +1953,7 @@ export default function Admin() {
             </section>
           </>
         )}
-
-        {/* PURCHASES */}
+                {/* PURCHASES */}
 
         {page === "purchases" && (
           <>
@@ -1897,8 +2105,8 @@ export default function Admin() {
                       type="button"
                       className="admin-secondary-button"
                       onClick={() => {
-                        setEditingPurchase(null);
                         setPurchaseForm(emptyPurchase);
+                        setEditingPurchase(null);
                       }}
                     >
                       Cancel
@@ -1912,97 +2120,70 @@ export default function Admin() {
               <div className="admin-section-heading">
                 <div>
                   <h2>Purchase History</h2>
-                  <p>Every purchase has its own QR and barcode label.</p>
+                  <p>All recorded material purchases</p>
                 </div>
-
-                <button
-                  className="admin-primary-button"
-                  onClick={() => {
-                    setScanMessage("");
-                    setScannerOpen(true);
-                  }}
-                >
-                  Scan QR / Barcode
-                </button>
               </div>
 
-              {scanMessage && (
-                <div className="admin-message">{scanMessage}</div>
-              )}
+              <div className="admin-table-wrap">
+                <table className="admin-table">
+                  <thead>
+                    <tr>
+                      <th>Date</th>
+                      <th>Material</th>
+                      <th>Category</th>
+                      <th>Buy Price</th>
+                      <th>Quantity</th>
+                      <th>Purchase Total</th>
+                      <th>Expected Profit</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
 
-              {purchases.length === 0 ? (
-                <p>No purchase records yet.</p>
-              ) : (
-                <div className="admin-table-wrap">
-                  <table className="admin-table">
-                    <thead>
-                      <tr>
-                        <th>Date</th>
-                        <th>Item Code</th>
-                        <th>Material</th>
-                        <th>Category</th>
-                        <th>Buy Price</th>
-                        <th>Sell Price</th>
-                        <th>Quantity</th>
-                        <th>Total Cost</th>
-                        <th>Expected Profit</th>
-                        <th>Actions</th>
+                  <tbody>
+                    {purchases.map((item) => (
+                      <tr key={item.id}>
+                        <td>{item.purchase_date}</td>
+                        <td>{item.product_name}</td>
+                        <td>{item.category}</td>
+                        <td>{money(item.buy_price)}</td>
+                        <td>{item.quantity} {item.unit}</td>
+                        <td>
+                          {money(Number(item.buy_price) * Number(item.quantity))}
+                        </td>
+                        <td>
+                          {money(
+                            (Number(item.selling_price) - Number(item.buy_price)) *
+                              Number(item.quantity)
+                          )}
+                        </td>
+                        <td>
+                          <div className="admin-actions">
+                            <button
+                              type="button"
+                              onClick={() => printPurchaseLabel(item)}
+                            >
+                              Label
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => startEditPurchase(item)}
+                            >
+                              Edit
+                            </button>
+                            <button
+                              type="button"
+                              className="delete"
+                              onClick={() => deletePurchase(item.id)}
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </td>
                       </tr>
-                    </thead>
-
-                    <tbody>
-                      {purchases.map((item) => {
-                        const qty = Number(item.quantity);
-                        const cost = Number(item.buy_price) * qty;
-                        const profit =
-                          (Number(item.selling_price) -
-                            Number(item.buy_price)) *
-                          qty;
-
-                        return (
-                          <tr key={item.id}>
-                            <td>{item.purchase_date}</td>
-                            <td>{item.item_code || "Missing code"}</td>
-                            <td><strong>{item.product_name}</strong></td>
-                            <td>{item.category}</td>
-                            <td>{money(item.buy_price)}</td>
-                            <td>{money(item.selling_price)}</td>
-                            <td>
-                              {qty} {item.unit === "kg" ? "KG" : "Piece"}
-                            </td>
-                            <td>{money(cost)}</td>
-                            <td>{money(profit)}</td>
-
-                            <td>
-                              <div className="admin-actions">
-                                <button
-                                  onClick={() => printPurchaseLabel(item)}
-                                  disabled={!item.item_code}
-                                >
-                                  Label
-                                </button>
-
-                                <button
-                                  onClick={() => startEditPurchase(item)}
-                                >
-                                  Edit
-                                </button>
-
-                                <button
-                                  className="delete"
-                                  onClick={() => deletePurchase(item.id)}
-                                >
-                                  Delete
-                                </button>
-                              </div>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              )}
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </section>
           </>
         )}
@@ -2013,270 +2194,241 @@ export default function Admin() {
           <section className="admin-section">
             <div className="admin-section-heading">
               <div>
-                <h2>All Orders</h2>
-                <p>Manage customer orders and delivery status</p>
+                <h2>Online Orders</h2>
+                <p>Manage customer orders from your website</p>
               </div>
-
-              <button
-                className="admin-secondary-button"
-                onClick={loadOrders}
-              >
-                Refresh
-              </button>
             </div>
 
-            {orders.length === 0 ? (
-              <p>No recorded orders yet.</p>
-            ) : (
-              <div className="admin-table-wrap">
-                <table className="admin-table">
-                  <thead>
-                    <tr>
-                      <th>Order ID</th>
-                      <th>Customer</th>
-                      <th>Phone</th>
-                      <th>Total</th>
-                      <th>Status</th>
-                      <th>Order Date</th>
-                      <th>Actions</th>
+            <div className="admin-table-wrap">
+              <table className="admin-table">
+                <thead>
+                  <tr>
+                    <th>Order ID</th>
+                    <th>Customer</th>
+                    <th>Phone</th>
+                    <th>Total</th>
+                    <th>Status</th>
+                    <th>Order Date</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+
+                <tbody>
+                  {orders.map((order) => (
+                    <tr key={order.id}>
+                      <td>#{order.id}</td>
+                      <td>{order.customer_name}</td>
+                      <td>{order.phone}</td>
+                      <td>{money(order.total)}</td>
+
+                      <td>
+                        <select
+                          value={order.status || "Pending"}
+                          disabled={updatingOrderId === order.id}
+                          onChange={(e) =>
+                            updateOrderStatus(order.id, e.target.value)
+                          }
+                        >
+                          <option value="Pending">Pending</option>
+                          <option value="Confirmed">Confirmed</option>
+                          <option value="Processing">Processing</option>
+                          <option value="Shipped">Shipped</option>
+                          <option value="Delivered">Delivered</option>
+                        </select>
+                      </td>
+
+                      <td>
+                        {order.created_at
+                          ? new Date(order.created_at).toLocaleString("en-BD")
+                          : "N/A"}
+                      </td>
+
+                      <td>
+                        <button
+                          className="admin-primary-button"
+                          onClick={() => setSelectedOrder(order)}
+                        >
+                          View Details
+                        </button>
+                      </td>
                     </tr>
-                  </thead>
-
-                  <tbody>
-                    {orders.map((order) => (
-                      <tr key={order.id}>
-                        <td>#{order.id}</td>
-                        <td>{order.customer_name}</td>
-                        <td>{order.phone}</td>
-                        <td>{money(order.total)}</td>
-
-                        <td>
-                          <select
-                            value={order.status || "Pending"}
-                            disabled={updatingOrderId === order.id}
-                            onChange={(e) =>
-                              updateOrderStatus(order.id, e.target.value)
-                            }
-                          >
-                            <option value="Pending">Pending</option>
-                            <option value="Confirmed">Confirmed</option>
-                            <option value="Processing">Processing</option>
-                            <option value="Shipped">Shipped</option>
-                            <option value="Delivered">Delivered</option>
-                          </select>
-                        </td>
-
-                        <td>
-                          {order.created_at
-                            ? new Date(order.created_at).toLocaleString("en-BD")
-                            : "N/A"}
-                        </td>
-
-                        <td>
-                          <button
-                            className="admin-secondary-button"
-                            onClick={() => setSelectedOrder(order)}
-                          >
-                            View Details
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </section>
         )}
-
-        {/* DIRECT SALE */}
+                {/* DIRECT SALE / POS */}
 
         {page === "direct-sale" && (
-          <>
-            <section className="admin-section">
-              <div className="admin-section-heading">
+          <section className="admin-section">
+            <div className="admin-section-heading">
+              <div>
+                <h2>Create New Invoice</h2>
+                <p>Scan product barcode to add items to invoice</p>
+              </div>
+            </div>
+
+            <form onSubmit={createDirectSale}>
+              <div className="admin-form-row">
                 <div>
-                  <h2>Create New Invoice</h2>
-                  <p>Garage counter sale — fixed product selling prices</p>
+                  <label>Customer Name (Optional)</label>
+                  <input
+                    value={saleCustomerName}
+                    onChange={(e) => setSaleCustomerName(e.target.value)}
+                    placeholder="Walk-in Customer"
+                  />
+                </div>
+
+                <div>
+                  <label>Phone Number (Optional)</label>
+                  <input
+                    value={salePhone}
+                    onChange={(e) => setSalePhone(e.target.value)}
+                    placeholder="01XXXXXXXXX"
+                  />
                 </div>
               </div>
 
-              <form onSubmit={createDirectSale}>
-                <div className="admin-form-row">
-                  <div>
-                    <label>Customer Name (Optional)</label>
-                    <input
-                      value={saleCustomerName}
-                      onChange={(e) => setSaleCustomerName(e.target.value)}
-                      placeholder="Walk-in Customer"
-                    />
-                  </div>
+              <label>Payment Method</label>
+              <select
+                value={salePayment}
+                onChange={(e) => setSalePayment(e.target.value)}
+              >
+                <option value="Cash">Cash</option>
+                <option value="bKash">bKash</option>
+                <option value="Nagad">Nagad</option>
+                <option value="Bank">Bank</option>
+              </select>
 
-                  <div>
-                    <label>Phone Number (Optional)</label>
-                    <input
-                      value={salePhone}
-                      onChange={(e) => setSalePhone(e.target.value)}
-                      placeholder="01XXXXXXXXX"
-                    />
-                  </div>
-                </div>
+              <hr />
 
-                <label>Payment Method</label>
-                <select
-                  value={salePayment}
-                  onChange={(e) => setSalePayment(e.target.value)}
-                >
-                  <option value="Cash">Cash</option>
-                  <option value="bKash">bKash</option>
-                  <option value="Nagad">Nagad</option>
-                  <option value="Bank">Bank</option>
-                </select>
+              <h3>Scan Product Barcode</h3>
 
-                <hr />
+              <label>USB Barcode Scanner</label>
+              <input
+                autoFocus
+                type="text"
+                value={saleBarcodeInput}
+                onChange={(e) => setSaleBarcodeInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    handleSaleBarcodeSubmit(e);
+                  }
+                }}
+                placeholder="Click here and scan product barcode"
+              />
 
-                <h3>Add Products</h3>
+              {saleBarcodeMessage && (
+                <p>{saleBarcodeMessage}</p>
+              )}
 
-                <input
-                  value={saleSearch}
-                  onChange={(e) => setSaleSearch(e.target.value)}
-                  placeholder="Search product name..."
-                />
+              <button
+                type="button"
+                className="admin-secondary-button"
+                onClick={() => {
+                  setSaleBarcodeMessage("");
+                  setSaleCameraOpen(true);
+                }}
+                style={{ marginTop: "10px" }}
+              >
+                📷 Open Camera Scanner
+              </button>
 
+              <hr />
+
+              <h3>Invoice Items</h3>
+
+              {saleCart.length === 0 ? (
+                <p>No products scanned yet.</p>
+              ) : (
                 <div className="admin-table-wrap">
                   <table className="admin-table">
                     <thead>
                       <tr>
                         <th>Product</th>
-                        <th>Price</th>
-                        <th>Stock</th>
+                        <th>Fixed Price</th>
+                        <th>Quantity</th>
+                        <th>Total</th>
                         <th>Action</th>
                       </tr>
                     </thead>
 
                     <tbody>
-                      {filteredSaleProducts.map((product) => (
-                        <tr key={product.id}>
-                          <td>{product.name}</td>
-                          <td>{money(product.price)}</td>
-                          <td>{product.stock}</td>
+                      {saleCart.map((item) => (
+                        <tr key={item.product_id}>
+                          <td>{item.name}</td>
+                          <td>{money(item.price)}</td>
+                          <td>
+                            <input
+                              type="number"
+                              min="0.001"
+                              step="0.001"
+                              max={item.stock}
+                              value={item.quantity}
+                              onChange={(e) =>
+                                updateSaleQuantity(
+                                  item.product_id,
+                                  e.target.value
+                                )
+                              }
+                              style={{ width: "90px" }}
+                            />
+                            <small> Max: {item.stock}</small>
+                          </td>
+                          <td>
+                            {money(item.price * item.quantity)}
+                          </td>
                           <td>
                             <button
                               type="button"
-                              className="admin-primary-button"
-                              disabled={Number(product.stock) <= 0}
-                              onClick={() => addProductToSale(product)}
+                              className="admin-secondary-button"
+                              onClick={() =>
+                                removeSaleItem(item.product_id)
+                              }
                             >
-                              + Add
+                              Remove
                             </button>
                           </td>
                         </tr>
                       ))}
-
-                      {filteredSaleProducts.length === 0 && (
-                        <tr>
-                          <td colSpan="4">No products found.</td>
-                        </tr>
-                      )}
                     </tbody>
                   </table>
                 </div>
+              )}
 
-                <hr />
-
-                <h3>Invoice Items</h3>
-
-                {saleCart.length === 0 ? (
-                  <p>No products added yet.</p>
-                ) : (
-                  <div className="admin-table-wrap">
-                    <table className="admin-table">
-                      <thead>
-                        <tr>
-                          <th>Product</th>
-                          <th>Fixed Price</th>
-                          <th>Quantity</th>
-                          <th>Total</th>
-                          <th>Action</th>
-                        </tr>
-                      </thead>
-
-                      <tbody>
-                        {saleCart.map((item) => (
-                          <tr key={item.product_id}>
-                            <td>{item.name}</td>
-                            <td>{money(item.price)}</td>
-                            <td>
-                              <input
-                                type="number"
-                                min="0.001"
-                                step="0.001"
-                                max={item.stock}
-                                value={item.quantity}
-                                onChange={(e) =>
-                                  updateSaleQuantity(
-                                    item.product_id,
-                                    e.target.value
-                                  )
-                                }
-                                style={{ width: "90px" }}
-                              />
-                              <small> Max: {item.stock}</small>
-                            </td>
-                            <td>
-                              {money(item.price * item.quantity)}
-                            </td>
-                            <td>
-                              <button
-                                type="button"
-                                className="admin-secondary-button"
-                                onClick={() =>
-                                  removeSaleItem(item.product_id)
-                                }
-                              >
-                                Remove
-                              </button>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-
-                <div className="admin-stat-grid">
-                  <div className="admin-stat">
-                    <span>Total Items</span>
-                    <strong>{saleCart.length}</strong>
-                  </div>
-
-                  <div className="admin-stat">
-                    <span>Grand Total</span>
-                    <strong>{money(saleSubtotal)}</strong>
-                  </div>
+              <div className="admin-stat-grid">
+                <div className="admin-stat">
+                  <span>Total Products</span>
+                  <strong>{saleCart.length}</strong>
                 </div>
 
-                <div className="admin-form-actions">
-                  <button
-                    type="submit"
-                    className="admin-primary-button"
-                    disabled={savingSale || saleCart.length === 0}
-                  >
-                    {savingSale ? "Creating Invoice..." : "Create Invoice"}
-                  </button>
-
-                  <button
-                    type="button"
-                    className="admin-secondary-button"
-                    onClick={resetSaleForm}
-                    disabled={savingSale}
-                  >
-                    Clear
-                  </button>
+                <div className="admin-stat">
+                  <span>Grand Total</span>
+                  <strong>{money(saleSubtotal)}</strong>
                 </div>
-              </form>
-            </section>
-          </>
+              </div>
+
+              <div className="admin-form-actions">
+                <button
+                  type="submit"
+                  className="admin-primary-button"
+                  disabled={savingSale || saleCart.length === 0}
+                >
+                  {savingSale ? "Creating Invoice..." : "Create Invoice"}
+                </button>
+
+                <button
+                  type="button"
+                  className="admin-secondary-button"
+                  onClick={resetSaleForm}
+                >
+                  Clear Invoice
+                </button>
+              </div>
+            </form>
+          </section>
         )}
 
         {/* SALES HISTORY */}
@@ -2286,10 +2438,11 @@ export default function Admin() {
             <div className="admin-section-heading">
               <div>
                 <h2>Direct Sales History</h2>
-                <p>All garage counter sales and invoices</p>
+                <p>All counter sales and invoices</p>
               </div>
 
               <button
+                type="button"
                 className="admin-secondary-button"
                 onClick={loadSales}
               >
@@ -2305,14 +2458,7 @@ export default function Admin() {
 
               <div className="admin-stat">
                 <span>Total Direct Sale Revenue</span>
-                <strong>
-                  {money(
-                    sales.reduce(
-                      (sum, sale) => sum + Number(sale.total || 0),
-                      0
-                    )
-                  )}
-                </strong>
+                <strong>{money(totalSalesRevenue)}</strong>
               </div>
             </div>
 
@@ -2342,10 +2488,13 @@ export default function Admin() {
                         <td>{sale.payment_method}</td>
                         <td>{money(sale.total)}</td>
                         <td>
-                          {new Date(sale.created_at).toLocaleDateString("en-BD")}
+                          {sale.created_at
+                            ? new Date(sale.created_at).toLocaleDateString("en-BD")
+                            : "N/A"}
                         </td>
                         <td>
                           <button
+                            type="button"
                             className="admin-primary-button"
                             onClick={() => printSaleHistoryInvoice(sale)}
                           >
@@ -2367,7 +2516,9 @@ export default function Admin() {
           <div
             className="crs-modal-backdrop"
             onClick={(e) => {
-              if (e.target === e.currentTarget) setSelectedOrder(null);
+              if (e.target === e.currentTarget) {
+                setSelectedOrder(null);
+              }
             }}
           >
             <div className="crs-modal">
@@ -2378,6 +2529,7 @@ export default function Admin() {
                 </div>
 
                 <button
+                  type="button"
                   className="admin-secondary-button"
                   onClick={() => setSelectedOrder(null)}
                 >
@@ -2386,7 +2538,6 @@ export default function Admin() {
               </div>
 
               <h3>Customer Information</h3>
-
               <p><strong>Name:</strong> {selectedOrder.customer_name}</p>
               <p><strong>Phone:</strong> {selectedOrder.phone}</p>
               <p><strong>Email:</strong> {selectedOrder.email || "Not provided"}</p>
@@ -2471,6 +2622,7 @@ export default function Admin() {
                 </div>
 
                 <button
+                  type="button"
                   className="admin-secondary-button"
                   onClick={() => setSelectedSale(null)}
                 >
@@ -2484,6 +2636,7 @@ export default function Admin() {
               <p>Payment: {selectedSale.payment_method}</p>
 
               <button
+                type="button"
                 className="admin-primary-button"
                 onClick={() => printSaleInvoice(selectedSale)}
               >
@@ -2493,11 +2646,35 @@ export default function Admin() {
           </div>
         )}
 
-        {loading && (
-          <p className="admin-loading">Loading data...</p>
+        {/* DIRECT SALE BARCODE CAMERA MODAL */}
+
+        {saleCameraOpen && (
+          <div className="crs-modal-backdrop">
+            <div className="crs-modal">
+              <div className="admin-section-heading">
+                <h2>Scan Product Barcode</h2>
+
+                <button
+                  type="button"
+                  className="admin-secondary-button"
+                  onClick={() => setSaleCameraOpen(false)}
+                >
+                  Close
+                </button>
+              </div>
+
+              <p>
+                Allow camera access and hold the product barcode inside the frame.
+              </p>
+
+              <div id="crs-sale-barcode-camera" />
+
+              {saleBarcodeMessage && <p>{saleBarcodeMessage}</p>}
+            </div>
+          </div>
         )}
 
-        {/* CAMERA SCANNER MODAL */}
+        {/* PURCHASE CAMERA SCANNER MODAL */}
 
         {scannerOpen && (
           <div className="crs-modal-backdrop">
@@ -2506,6 +2683,7 @@ export default function Admin() {
                 <h2>Scan Item Code</h2>
 
                 <button
+                  type="button"
                   className="admin-secondary-button"
                   onClick={() => setScannerOpen(false)}
                 >
@@ -2514,8 +2692,7 @@ export default function Admin() {
               </div>
 
               <p>
-                Allow camera access and hold the QR code or barcode
-                inside the frame.
+                Allow camera access and hold the QR code or barcode inside the frame.
               </p>
 
               <div id="crs-qr-scanner" />
@@ -2525,15 +2702,16 @@ export default function Admin() {
           </div>
         )}
 
-        {/* ITEM LABEL MODAL */}
+        {/* PURCHASE LABEL MODAL */}
 
         {selectedPurchase && (
           <div className="crs-modal-backdrop">
             <div className="crs-modal">
               <div className="admin-section-heading">
-                <h2>Item Label</h2>
+                <h2>Purchase Item Label</h2>
 
                 <button
+                  type="button"
                   className="admin-secondary-button"
                   onClick={() => setSelectedPurchase(null)}
                 >
@@ -2541,10 +2719,7 @@ export default function Admin() {
                 </button>
               </div>
 
-              <div
-                id="crs-print-label"
-                className="crs-item-label"
-              >
+              <div id="crs-print-label" className="crs-item-label">
                 <div className="crs-label-brand">
                   CUMILLA RECYCLE SHOP
                 </div>
@@ -2585,6 +2760,7 @@ export default function Admin() {
 
               <div className="admin-form-actions">
                 <button
+                  type="button"
                   className="admin-primary-button"
                   onClick={printCurrentLabel}
                 >
@@ -2592,6 +2768,7 @@ export default function Admin() {
                 </button>
 
                 <button
+                  type="button"
                   className="admin-secondary-button"
                   onClick={downloadPurchaseLabel}
                 >
@@ -2604,12 +2781,7 @@ export default function Admin() {
               </p>
 
               <p>Buy Price: {money(selectedPurchase.buy_price)}</p>
-
-              <p>
-                Expected Selling Price:{" "}
-                {money(selectedPurchase.selling_price)}
-              </p>
-
+              <p>Expected Selling Price: {money(selectedPurchase.selling_price)}</p>
               <p>
                 Expected Profit:{" "}
                 {money(
@@ -2620,6 +2792,68 @@ export default function Admin() {
               </p>
             </div>
           </div>
+        )}
+
+        {/* PRODUCT BARCODE LABEL MODAL */}
+
+        {selectedBarcodeProduct && (
+          <div className="crs-modal-backdrop">
+            <div className="crs-modal">
+              <div className="admin-section-heading">
+                <h2>Product Barcode Label</h2>
+
+                <button
+                  type="button"
+                  className="admin-secondary-button"
+                  onClick={() => setSelectedBarcodeProduct(null)}
+                >
+                  Close
+                </button>
+              </div>
+
+              <div
+                id="crs-product-print-label"
+                className="crs-product-print-label"
+              >
+                <div className="crs-product-print-brand">
+                  CUMILLA RECYCLE SHOP
+                </div>
+
+                <div className="crs-product-print-name">
+                  {selectedBarcodeProduct.name}
+                </div>
+
+                <p>{money(selectedBarcodeProduct.price)}</p>
+
+                <Barcode
+                  value={selectedBarcodeProduct.barcode}
+                  format="CODE128"
+                  width={1.8}
+                  height={55}
+                  fontSize={12}
+                  margin={4}
+                />
+
+                <div className="crs-product-print-code">
+                  {selectedBarcodeProduct.barcode}
+                </div>
+              </div>
+
+              <div className="admin-form-actions">
+                <button
+                  type="button"
+                  className="admin-primary-button"
+                  onClick={printCurrentProductBarcodeLabel}
+                >
+                  Print Product Label
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {loading && (
+          <p className="admin-loading">Loading data...</p>
         )}
       </main>
     </div>
