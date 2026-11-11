@@ -1095,7 +1095,6 @@ export default function Admin() {
 
   function resetSaleForm() {
     setSaleCart([]);
-    setSaleSearch("");
     setSaleBarcodeInput("");
     setSaleBarcodeMessage("");
     setSaleCustomerName("");
