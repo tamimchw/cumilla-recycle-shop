@@ -1,4 +1,3 @@
-
 import { useEffect, useMemo, useState } from "react";
 import Admin from "./Admin";
 import { supabase } from "./supabase";
@@ -7,10 +6,170 @@ import "./App.css";
 const money = (amount) =>
   "৳" + Number(amount || 0).toLocaleString("en-BD");
 
-function App() {
+function BannerSlot({ banners, slot, fallbackTitle }) {
+  const [activeIndex, setActiveIndex] = useState(0);
+
+  const items = banners.filter(
+    (banner) => banner.slot === slot && banner.is_active
+  );
+
+  useEffect(() => {
+    if (items.length < 2) return;
+
+    const timer = setInterval(() => {
+      setActiveIndex((current) => (current + 1) % items.length);
+    }, 5000);
+
+    return () => clearInterval(timer);
+  }, [items.length]);
+
+  if (!items.length) {
+    return (
+      <div
+        style={{
+          width: "100%",
+          minHeight: 230,
+          borderRadius: 20,
+          background: "linear-gradient(135deg,#d9f3e2,#a9dfbd)",
+          display: "flex",
+          flexDirection: "column",
+          justifyContent: "center",
+          alignItems: "center",
+          color: "#075b37",
+          padding: 24,
+          textAlign: "center",
+          boxSizing: "border-box",
+        }}
+      >
+        <strong style={{ fontSize: 26 }}>{fallbackTitle}</strong>
+        <span style={{ marginTop: 8 }}>New offers coming soon</span>
+      </div>
+    );
+  }
+
+  const banner = items[activeIndex % items.length];
+
+  return (
+    <div
+      style={{
+        position: "relative",
+        width: "100%",
+        minHeight: 230,
+        borderRadius: 20,
+        overflow: "hidden",
+        background: "#e5f4e9",
+      }}
+    >
+      <img
+        src={banner.image_url}
+        alt={banner.title || fallbackTitle}
+        style={{
+          width: "100%",
+          height: "100%",
+          minHeight: 230,
+          objectFit: "cover",
+          display: "block",
+        }}
+      />
+
+      {(banner.title || banner.description || banner.button_text) && (
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            display: "flex",
+            flexDirection: "column",
+            justifyContent: "flex-end",
+            alignItems: "flex-start",
+            padding: 24,
+            color: "#fff",
+            background:
+              "linear-gradient(0deg,rgba(0,0,0,.68),transparent 72%)",
+          }}
+        >
+          {banner.title && (
+            <h2 style={{ margin: "0 0 6px", color: "#fff" }}>
+              {banner.title}
+            </h2>
+          )}
+
+          {banner.description && (
+            <p style={{ margin: "0 0 12px", maxWidth: 500 }}>
+              {banner.description}
+            </p>
+          )}
+
+          {banner.button_text && (
+            <a
+              href={banner.button_link || "#products"}
+              style={{
+                background: "#fff",
+                color: "#087344",
+                padding: "10px 18px",
+                borderRadius: 9,
+                textDecoration: "none",
+                fontWeight: 700,
+              }}
+            >
+              {banner.button_text}
+            </a>
+          )}
+        </div>
+      )}
+
+      {items.length > 1 && (
+        <div
+          style={{
+            position: "absolute",
+            right: 14,
+            top: 14,
+            display: "flex",
+            gap: 6,
+          }}
+        >
+          <button
+            aria-label="Previous banner"
+            onClick={() =>
+              setActiveIndex(
+                (activeIndex - 1 + items.length) % items.length
+              )
+            }
+            style={bannerNavStyle}
+          >
+            ‹
+          </button>
+
+          <button
+            aria-label="Next banner"
+            onClick={() =>
+              setActiveIndex((activeIndex + 1) % items.length)
+            }
+            style={bannerNavStyle}
+          >
+            ›
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const bannerNavStyle = {
+  width: 34,
+  height: 34,
+  border: 0,
+  borderRadius: "50%",
+  background: "rgba(255,255,255,.92)",
+  color: "#075b37",
+  fontSize: 24,
+  cursor: "pointer",
+};
+
+function Storefront() {
   const [products, setProducts] = useState([]);
   const [loadingProducts, setLoadingProducts] = useState(true);
   const [productError, setProductError] = useState("");
+  const [banners, setBanners] = useState([]);
 
   const [search, setSearch] = useState("");
   const [category, setCategory] = useState("All");
@@ -25,16 +184,23 @@ function App() {
   const [orderSubmitting, setOrderSubmitting] = useState(false);
   const [orderError, setOrderError] = useState("");
 
-  // Admin page
-  if (window.location.pathname === "/admin") {
-    return <Admin />;
-  }
-
-  // Load products from Supabase
+  // Load products and banners from Supabase
   useEffect(() => {
     async function loadProducts() {
       setLoadingProducts(true);
       setProductError("");
+
+      const { data: bannerData, error: bannerError } = await supabase
+        .from("offer_banners")
+        .select("*")
+        .eq("is_active", true)
+        .order("created_at", { ascending: false });
+
+      if (bannerError) {
+        console.error("Banner load error:", bannerError);
+      }
+
+      setBanners(bannerData || []);
 
       const { data, error } = await supabase
         .from("products")
@@ -271,16 +437,21 @@ function App() {
 
   return (
     <div className="app">
-
       {/* NAVBAR */}
       <header className="navbar">
         <div className="nav-container">
+          {/* CRS LOGO */}
           <a href="#" className="logo">
-            <span className="logo-icon">♻</span>
-            <span>
-              <strong>CUMILLA</strong>
-              <small>RECYCLE SHOP</small>
-            </span>
+            <img
+              src="/crs-logo.jpeg"
+              alt="Cumilla Recycle Shop Logo"
+              style={{
+                width: "65px",
+                height: "65px",
+                objectFit: "contain",
+                borderRadius: "8px",
+              }}
+            />
           </a>
 
           <nav className="nav-links">
@@ -311,33 +482,13 @@ function App() {
       </header>
 
       <main>
-
-        {/* BIG DEALS BANNER */}
-        <section className="big-deals-banner">
-          <div className="big-deals-content">
-            <span className="big-deals-label">
-              ✦ SPECIAL OFFERS
-            </span>
-
-            <h2>BIG DEALS</h2>
-
-            <h3>Great Products. Better Prices.</h3>
-
-            <p>
-              Discover amazing deals and shop your favourite
-              products at Cumilla Recycle Shop.
-            </p>
-
-            <a href="#products" className="big-deals-button">
-              SHOP NOW <span>→</span>
-            </a>
-          </div>
-
-          <div className="big-deals-decoration">
-            <span>BIG</span>
-            <strong>DEALS</strong>
-            <small>SHOP • SAVE • REPEAT</small>
-          </div>
+        {/* HOT OFFER BANNER */}
+        <section style={{ padding: "28px 5.3% 12px" }}>
+          <BannerSlot
+            banners={banners}
+            slot="hot_offer"
+            fallbackTitle="HOT OFFER"
+          />
         </section>
 
         {/* HERO */}
@@ -387,64 +538,16 @@ function App() {
             </div>
           </div>
 
-          <div className="hero-image">
-            <div className="hero-image-circle">
-              <span>♻</span>
-            </div>
-
-            <div className="hero-floating-card">
-              <span>🌱</span>
-              <div>
-                <strong>Go Green</strong>
-                <small>Shop Sustainably</small>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        {/* FEATURES */}
-        <section className="features-section" id="features">
-          <div className="section-heading">
-            <span>WHY CHOOSE US</span>
-            <h2>Shopping Made Better</h2>
-            <p>
-              Quality products, affordable prices and a
-              sustainable shopping experience.
-            </p>
-          </div>
-
-          <div className="features-grid">
-            <div className="feature-card">
-              <span>🌿</span>
-              <h3>Eco Friendly</h3>
-              <p>
-                Support recycling and help reduce unnecessary waste.
-              </p>
-            </div>
-
-            <div className="feature-card">
-              <span>💰</span>
-              <h3>Affordable Price</h3>
-              <p>
-                Find useful products at prices that make sense.
-              </p>
-            </div>
-
-            <div className="feature-card">
-              <span>🚚</span>
-              <h3>Easy Delivery</h3>
-              <p>
-                Order online and get your products delivered.
-              </p>
-            </div>
-
-            <div className="feature-card">
-              <span>🔒</span>
-              <h3>Easy Ordering</h3>
-              <p>
-                Simple checkout with Cash on Delivery option.
-              </p>
-            </div>
+          {/* BIG DEAL BANNER */}
+          <div
+            className="hero-image"
+            style={{ display: "block", padding: 0 }}
+          >
+            <BannerSlot
+              banners={banners}
+              slot="big_deal"
+              fallbackTitle="BIG DEAL"
+            />
           </div>
         </section>
 
@@ -580,19 +683,24 @@ function App() {
             Start Shopping →
           </a>
         </section>
-
       </main>
 
       {/* FOOTER */}
       <footer className="footer" id="contact">
         <div className="footer-content">
           <div className="footer-brand">
+            {/* CRS LOGO */}
             <a href="#" className="logo">
-              <span className="logo-icon">♻</span>
-              <span>
-                <strong>CUMILLA</strong>
-                <small>RECYCLE SHOP</small>
-              </span>
+              <img
+                src="/crs-logo.jpeg"
+                alt="Cumilla Recycle Shop Logo"
+                style={{
+                  width: "90px",
+                  height: "90px",
+                  objectFit: "contain",
+                  borderRadius: "8px",
+                }}
+              />
             </a>
 
             <p>
@@ -1006,8 +1114,50 @@ function App() {
         </div>
       )}
 
+      {/* FLOATING WHATSAPP CONTACT BUTTON */}
+      <a
+        href="https://wa.me/8801961848828?text=Hello%2C%20I%20want%20to%20know%20about%20your%20products."
+        target="_blank"
+        rel="noopener noreferrer"
+        aria-label="Chat with Cumilla Recycle Shop on WhatsApp"
+        title="Chat with us on WhatsApp"
+        style={{
+          position: "fixed",
+          right: "24px",
+          bottom: "24px",
+          width: "58px",
+          height: "58px",
+          borderRadius: "50%",
+          backgroundColor: "#25D366",
+          color: "#ffffff",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          boxShadow: "0 4px 14px rgba(0,0,0,0.25)",
+          zIndex: 9999,
+          textDecoration: "none",
+        }}
+      >
+        <svg
+          viewBox="0 0 32 32"
+          width="34"
+          height="34"
+          fill="currentColor"
+          aria-hidden="true"
+        >
+          <path d="M16.01 3C8.85 3 3.02 8.78 3.02 15.9c0 2.28.6 4.5 1.75 6.46L3 29l6.84-1.78a13.1 13.1 0 0 0 6.17 1.55h.01c7.16 0 12.99-5.79 12.99-12.9C29.01 8.77 23.18 3 16.01 3Zm0 23.58h-.01a10.9 10.9 0 0 1-5.55-1.51l-.4-.24-4.06 1.06 1.08-3.94-.26-.41a10.67 10.67 0 0 1-1.65-5.64c0-5.95 4.88-10.79 10.86-10.79 2.9 0 5.63 1.12 7.68 3.16a10.68 10.68 0 0 1 3.18 7.63c0 5.95-4.88 10.79-10.87 10.79Zm5.96-8.08c-.33-.16-1.94-.95-2.24-1.06-.3-.11-.52-.16-.74.16-.22.32-.85 1.06-1.04 1.28-.19.21-.38.24-.71.08-.33-.16-1.4-.51-2.67-1.63-.99-.87-1.66-1.94-1.85-2.27-.19-.32-.02-.5.14-.66.15-.14.33-.38.49-.57.16-.19.22-.32.33-.54.11-.21.06-.4-.03-.56-.08-.16-.74-1.77-1.01-2.42-.27-.64-.54-.55-.74-.56h-.63c-.22 0-.57.08-.87.4-.3.32-1.14 1.11-1.14 2.7s1.17 3.13 1.33 3.34c.16.21 2.3 3.5 5.57 4.9.78.33 1.39.53 1.86.68.78.25 1.49.22 2.05.13.63-.1 1.94-.79 2.21-1.55.27-.76.27-1.41.19-1.55-.08-.14-.3-.22-.63-.38Z" />
+        </svg>
+      </a>
     </div>
   );
+}
+
+function App() {
+  if (window.location.pathname === "/admin") {
+    return <Admin />;
+  }
+
+  return <Storefront />;
 }
 
 export default App;
