@@ -12,8 +12,8 @@ function App() {
   const [loadingProducts, setLoadingProducts] = useState(true);
   const [productError, setProductError] = useState("");
 
-  const [category, setCategory] = useState("All");
   const [search, setSearch] = useState("");
+  const [category, setCategory] = useState("All");
 
   const [cart, setCart] = useState([]);
   const [cartOpen, setCartOpen] = useState(false);
@@ -25,7 +25,12 @@ function App() {
   const [orderSubmitting, setOrderSubmitting] = useState(false);
   const [orderError, setOrderError] = useState("");
 
-  // Load published products from Supabase
+  // Admin page
+  if (window.location.pathname === "/admin") {
+    return <Admin />;
+  }
+
+  // Load products from Supabase
   useEffect(() => {
     async function loadProducts() {
       setLoadingProducts(true);
@@ -35,20 +40,13 @@ function App() {
         .from("products")
         .select("*")
         .eq("is_published", true)
-        .order("id", { ascending: true });
+        .order("id", { ascending: false });
 
       if (error) {
-        console.error("Product loading error:", error);
+        console.error(error);
         setProductError(error.message);
       } else {
-        setProducts(
-          (data || []).map((product) => ({
-            ...product,
-            image: product.image_url,
-            oldPrice: 0,
-            tag: "NEW",
-          }))
-        );
+        setProducts(data || []);
       }
 
       setLoadingProducts(false);
@@ -57,23 +55,51 @@ function App() {
     loadProducts();
   }, []);
 
-  // Search and category filter
+  // Categories
+  const categories = useMemo(() => {
+    const names = products
+      .map((product) => product.category)
+      .filter(Boolean);
+
+    return ["All", ...new Set(names)];
+  }, [products]);
+
+  // Filter products
   const filteredProducts = useMemo(() => {
     return products.filter((product) => {
-      const matchesCategory =
-        category === "All" || product.category === category;
-
-      const matchesSearch = product.name
+      const matchesSearch = String(product.name || "")
         .toLowerCase()
         .includes(search.toLowerCase());
 
-      return matchesCategory && matchesSearch;
+      const matchesCategory =
+        category === "All" || product.category === category;
+
+      return matchesSearch && matchesCategory;
     });
-  }, [products, category, search]);
+  }, [products, search, category]);
+
+  // Cart calculations
+  const totalItems = cart.reduce(
+    (sum, item) => sum + item.quantity,
+    0
+  );
+
+  const subtotal = cart.reduce(
+    (sum, item) =>
+      sum + Number(item.price || 0) * item.quantity,
+    0
+  );
+
+  const delivery =
+    subtotal === 0 || subtotal >= 3000 ? 0 : 80;
+
+  const total = subtotal + delivery;
 
   // Add to cart
   const addToCart = (product) => {
-    if (Number(product.stock) <= 0) {
+    const stock = Number(product.stock || 0);
+
+    if (stock <= 0) {
       alert("Sorry! This product is out of stock.");
       return;
     }
@@ -84,8 +110,8 @@ function App() {
       );
 
       if (existing) {
-        if (existing.quantity >= Number(product.stock)) {
-          alert("Sorry! Maximum available stock reached.");
+        if (existing.quantity >= stock) {
+          alert("Maximum available stock reached.");
           return current;
         }
 
@@ -100,6 +126,7 @@ function App() {
     });
 
     setSelectedProduct(null);
+    setCartOpen(true);
   };
 
   // Change quantity
@@ -111,7 +138,7 @@ function App() {
 
           const newQuantity = item.quantity + amount;
 
-          if (newQuantity > Number(item.stock)) {
+          if (newQuantity > Number(item.stock || 0)) {
             return item;
           }
 
@@ -121,37 +148,22 @@ function App() {
     );
   };
 
-  // Remove product
+  // Remove item
   const removeFromCart = (id) => {
     setCart((current) =>
       current.filter((item) => item.id !== id)
     );
   };
 
-  // Cart calculations
-  const totalItems = cart.reduce(
-    (sum, item) => sum + item.quantity,
-    0
-  );
-
-  const subtotal = cart.reduce(
-    (sum, item) => sum + Number(item.price) * item.quantity,
-    0
-  );
-
-  const delivery =
-    subtotal === 0 || subtotal >= 3000 ? 0 : 80;
-
-  const total = subtotal + delivery;
-
-  // Real order submission through the secure Edge Function
+  // Submit order
   const handleOrder = async (e) => {
     e.preventDefault();
-    setOrderError("");
 
     if (orderSubmitting) return;
 
-    if (cart.length === 0) {
+    setOrderError("");
+
+    if (!cart.length) {
       setOrderError("Your shopping bag is empty.");
       return;
     }
@@ -173,32 +185,38 @@ function App() {
       })),
     };
 
+    if (
+      !orderPayload.name ||
+      !orderPayload.phone ||
+      !orderPayload.district ||
+      !orderPayload.address
+    ) {
+      setOrderError("Please fill in all required fields.");
+      return;
+    }
+
+    if (!/^01[0-9]{9}$/.test(orderPayload.phone)) {
+      setOrderError("Enter a valid Bangladesh phone number.");
+      return;
+    }
+
     setOrderSubmitting(true);
 
     try {
       const { data, error } = await supabase.functions.invoke(
         "order-notification",
-        { body: orderPayload }
+        {
+          body: orderPayload,
+        }
       );
 
       if (error) {
-        let message =
-          error.message || "Could not submit your order.";
-
-        try {
-          const details = await error.context?.json?.();
-          if (details?.error) message = details.error;
-        } catch {
-          // Keep original error message.
-        }
-
-        throw new Error(message);
+        throw new Error(error.message || "Order submission failed.");
       }
 
       if (!data?.success || !data?.orderId) {
         throw new Error(
-          data?.error ||
-          "Order could not be confirmed. Please try again."
+          data?.error || "Could not confirm your order."
         );
       }
 
@@ -209,322 +227,409 @@ function App() {
         district: orderPayload.district,
         items: totalItems,
         total: Number(data.total ?? total),
-        emailSent: Boolean(data.emailSent),
+        payment: orderPayload.payment,
       });
 
-      // Update visible stock after successful order.
+      // Update local stock
       setProducts((current) =>
         current.map((product) => {
           const ordered = cart.find(
             (item) => item.id === product.id
           );
 
-          return ordered
-            ? {
-                ...product,
-                stock: Math.max(
-                  0,
-                  Number(product.stock) -
-                    Number(ordered.quantity)
-                ),
-              }
-            : product;
+          if (!ordered) return product;
+
+          return {
+            ...product,
+            stock: Math.max(
+              0,
+              Number(product.stock || 0) - ordered.quantity
+            ),
+          };
         })
       );
 
       setOrderPlaced(true);
       setCart([]);
     } catch (error) {
-      console.error("Order submission error:", error);
+      console.error("Order error:", error);
       setOrderError(
-        error.message || "Something went wrong. Please try again."
+        error.message || "Something went wrong. Try again."
       );
     } finally {
       setOrderSubmitting(false);
     }
   };
 
-  // Admin route
-  if (window.location.pathname === "/admin") {
-    return <Admin />;
-  }
+  // Reset checkout
+  const closeCheckout = () => {
+    setCheckoutOpen(false);
+    setOrderPlaced(false);
+    setOrderInfo(null);
+    setOrderError("");
+  };
 
   return (
     <div className="app">
 
-      {/* Announcement */}
-      <div className="announcement">
-        Free delivery on orders over ৳3,000
-      </div>
-
-      {/* Navbar */}
+      {/* NAVBAR */}
       <header className="navbar">
-        <a href="#home" className="logo">
-          CUMILLA RECYCLE SHOP<span>.</span>
-        </a>
+        <div className="nav-container">
+          <a href="#" className="logo">
+            <span className="logo-icon">♻</span>
+            <span>
+              <strong>CUMILLA</strong>
+              <small>RECYCLE SHOP</small>
+            </span>
+          </a>
 
-        <nav>
-          <a href="#home">Home</a>
-          <a href="#products">Shop</a>
-          <a href="#categories">Categories</a>
-          <a href="#footer">Contact</a>
-        </nav>
+          <nav className="nav-links">
+            <a href="#">Home</a>
+            <a href="#products">Products</a>
+            <a href="#features">About</a>
+            <a href="#contact">Contact</a>
+          </nav>
 
-        <div className="nav-actions">
-          <button
-            className="cart-button"
-            onClick={() => setCartOpen(true)}
-          >
-            Bag ({totalItems})
-          </button>
+          <div className="nav-actions">
+            <a href="#products" className="nav-order-button">
+              Order Now
+            </a>
+
+            <button
+              className={`cart-button ${
+                totalItems > 0 ? "has-items" : ""
+              }`}
+              onClick={() => setCartOpen(true)}
+              aria-label={`Open shopping bag, ${totalItems} items`}
+            >
+              <span className="cart-icon">🛍️</span>
+              <span>My Bag</span>
+              <span className="cart-count">{totalItems}</span>
+            </button>
+          </div>
         </div>
       </header>
 
       <main>
 
-        {/* Hero */}
-        <section className="hero" id="home">
+        {/* BIG DEALS BANNER */}
+        <section className="big-deals-banner">
+          <div className="big-deals-content">
+            <span className="big-deals-label">
+              ✦ SPECIAL OFFERS
+            </span>
+
+            <h2>BIG DEALS</h2>
+
+            <h3>Great Products. Better Prices.</h3>
+
+            <p>
+              Discover amazing deals and shop your favourite
+              products at Cumilla Recycle Shop.
+            </p>
+
+            <a href="#products" className="big-deals-button">
+              SHOP NOW <span>→</span>
+            </a>
+          </div>
+
+          <div className="big-deals-decoration">
+            <span>BIG</span>
+            <strong>DEALS</strong>
+            <small>SHOP • SAVE • REPEAT</small>
+          </div>
+        </section>
+
+        {/* HERO */}
+        <section className="hero">
           <div className="hero-content">
-            <span className="eyebrow">
-              THE NEW COLLECTION 2026
+            <span className="hero-label">
+              ♻ SMART SHOPPING, BETTER FUTURE
             </span>
 
             <h1>
-              Discover your<br />
-              everyday style.
+              Give Products
+              <br />
+              A <span>Second Life.</span>
             </h1>
 
             <p>
-              Thoughtfully selected products for your lifestyle.
-              Quality, simplicity and elegance in every detail.
+              Discover quality recycled and reusable products
+              at affordable prices. Shop smarter and support
+              a greener future.
             </p>
 
-            <a href="#products" className="primary-button">
-              Explore Collection <span>→</span>
-            </a>
+            <div className="hero-buttons">
+              <a href="#products" className="primary-button">
+                Explore Products →
+              </a>
 
-            <div className="hero-note">
-              Curated for everyday living.
+              <a href="#features" className="secondary-button">
+                Learn More
+              </a>
+            </div>
+
+            <div className="hero-stats">
+              <div>
+                <strong>{products.length}+</strong>
+                <span>Products</span>
+              </div>
+
+              <div>
+                <strong>100%</strong>
+                <span>Eco Friendly</span>
+              </div>
+
+              <div>
+                <strong>Local</strong>
+                <span>Cumilla Shop</span>
+              </div>
             </div>
           </div>
 
           <div className="hero-image">
-            <img
-              src="https://images.unsplash.com/photo-1441986300917-64674bd600d8?w=1100"
-              alt="Modern shopping collection"
+            <div className="hero-image-circle">
+              <span>♻</span>
+            </div>
+
+            <div className="hero-floating-card">
+              <span>🌱</span>
+              <div>
+                <strong>Go Green</strong>
+                <small>Shop Sustainably</small>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* FEATURES */}
+        <section className="features-section" id="features">
+          <div className="section-heading">
+            <span>WHY CHOOSE US</span>
+            <h2>Shopping Made Better</h2>
+            <p>
+              Quality products, affordable prices and a
+              sustainable shopping experience.
+            </p>
+          </div>
+
+          <div className="features-grid">
+            <div className="feature-card">
+              <span>🌿</span>
+              <h3>Eco Friendly</h3>
+              <p>
+                Support recycling and help reduce unnecessary waste.
+              </p>
+            </div>
+
+            <div className="feature-card">
+              <span>💰</span>
+              <h3>Affordable Price</h3>
+              <p>
+                Find useful products at prices that make sense.
+              </p>
+            </div>
+
+            <div className="feature-card">
+              <span>🚚</span>
+              <h3>Easy Delivery</h3>
+              <p>
+                Order online and get your products delivered.
+              </p>
+            </div>
+
+            <div className="feature-card">
+              <span>🔒</span>
+              <h3>Easy Ordering</h3>
+              <p>
+                Simple checkout with Cash on Delivery option.
+              </p>
+            </div>
+          </div>
+        </section>
+
+        {/* PRODUCTS */}
+        <section className="products-section" id="products">
+          <div className="section-heading">
+            <span>OUR COLLECTION</span>
+            <h2>Explore Our Products</h2>
+            <p>
+              Find something useful at a great price.
+            </p>
+          </div>
+
+          <div className="product-controls">
+            <input
+              type="search"
+              placeholder="Search products..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              aria-label="Search products"
             />
 
-            <div className="image-label">
-              <span>NEW SEASON</span>
-              <strong>Style starts here.</strong>
-            </div>
-          </div>
-        </section>
-
-        {/* Features */}
-        <section className="features">
-          <div>
-            <span>01</span>
-            <strong>Quality Products</strong>
-            <small>Carefully selected</small>
-          </div>
-
-          <div>
-            <span>02</span>
-            <strong>Secure Shopping</strong>
-            <small>Shop with confidence</small>
-          </div>
-
-          <div>
-            <span>03</span>
-            <strong>Easy Returns</strong>
-            <small>Simple return policy</small>
-          </div>
-
-          <div>
-            <span>04</span>
-            <strong>Fast Delivery</strong>
-            <small>Across Bangladesh</small>
-          </div>
-        </section>
-
-        {/* Products */}
-        <section className="shop-section" id="products">
-
-          <div className="section-heading">
-            <div>
-              <span className="eyebrow">
-                OUR COLLECTION
-              </span>
-
-              <h2>Shop the essentials.</h2>
-              <p>Find something you will love.</p>
-            </div>
-
-            <div className="search-box">
-              <span>⌕</span>
-
-              <input
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search products..."
-              />
-            </div>
-          </div>
-
-          {/* Categories */}
-          <div className="category-list" id="categories">
-            {["All", "Fashion", "Electronics", "Accessories"].map(
-              (item) => (
-                <button
-                  key={item}
-                  className={
-                    category === item
-                      ? "category active"
-                      : "category"
-                  }
-                  onClick={() => setCategory(item)}
-                >
+            <select
+              value={category}
+              onChange={(e) => setCategory(e.target.value)}
+              aria-label="Filter by category"
+            >
+              {categories.map((item) => (
+                <option key={item} value={item}>
                   {item}
-                </button>
-              )
-            )}
+                </option>
+              ))}
+            </select>
           </div>
 
-          {/* Loading */}
           {loadingProducts && (
-            <div className="empty-state">
-              Loading products from Cumilla Recycle Shop Database...
+            <div className="loading-message">
+              Loading products...
             </div>
           )}
 
-          {/* Error */}
           {productError && (
-            <div className="empty-state">
-              <p>Unable to load products.</p>
-              <p>{productError}</p>
-              <button
-                className="primary-button"
-                onClick={() => window.location.reload()}
-              >
-                Try Again
-              </button>
+            <div className="error-message">
+              Could not load products: {productError}
             </div>
           )}
 
-          {/* Product Grid */}
-          {!loadingProducts && !productError && (
-            <>
-              <div className="product-grid">
-                {filteredProducts.map((product) => (
-                  <article
-                    className="product-card"
-                    key={product.id}
-                  >
-                    <div className="product-image">
-                      <img
-                        src={product.image}
-                        alt={product.name}
-                        loading="lazy"
-                      />
-
-                      <span className="product-tag">
-                        {product.tag}
-                      </span>
-
-                      <button
-                        className="quick-add"
-                        onClick={() => addToCart(product)}
-                        disabled={Number(product.stock) <= 0}
-                      >
-                        {Number(product.stock) <= 0
-                          ? "Out of Stock"
-                          : "+ Add to bag"}
-                      </button>
-                    </div>
-
-                    <div className="product-info">
-                      <div>
-                        <span className="product-category">
-                          {product.category}
-                        </span>
-
-                        <h3
-                          className="clickable-product"
-                          onClick={() =>
-                            setSelectedProduct(product)
-                          }
-                        >
-                          {product.name}
-                        </h3>
-
-                        <button
-                          className="details-link"
-                          onClick={() =>
-                            setSelectedProduct(product)
-                          }
-                        >
-                          View details →
-                        </button>
-
-                        <small>
-                          Stock: {product.stock}
-                        </small>
-                      </div>
-
-                      <div className="price">
-                        <strong>{money(product.price)}</strong>
-                      </div>
-                    </div>
-                  </article>
-                ))}
+          {!loadingProducts &&
+            !productError &&
+            filteredProducts.length === 0 && (
+              <div className="empty-products">
+                <span>🔎</span>
+                <h3>No Products Found</h3>
+                <p>Try another search or category.</p>
               </div>
+            )}
 
-              {filteredProducts.length === 0 && (
-                <div className="empty-state">
-                  No products found. Try another search.
+          <div className="products-grid">
+            {filteredProducts.map((product) => (
+              <article className="product-card" key={product.id}>
+                <button
+                  className="product-image"
+                  onClick={() => setSelectedProduct(product)}
+                  aria-label={`View ${product.name}`}
+                >
+                  {product.image_url || product.image ? (
+                    <img
+                      src={product.image_url || product.image}
+                      alt={product.name}
+                    />
+                  ) : (
+                    <span className="no-image">♻</span>
+                  )}
+
+                  {Number(product.stock) <= 0 && (
+                    <span className="stock-badge">
+                      Out of Stock
+                    </span>
+                  )}
+                </button>
+
+                <div className="product-info">
+                  <span className="product-category">
+                    {product.category || "General"}
+                  </span>
+
+                  <h3>{product.name}</h3>
+
+                  <div className="product-price">
+                    <strong>{money(product.price)}</strong>
+                  </div>
+
+                  <p className="product-stock">
+                    {Number(product.stock) > 0
+                      ? `${product.stock} available`
+                      : "Currently unavailable"}
+                  </p>
+
+                  <div className="product-actions">
+                    <button
+                      className="add-cart-button"
+                      disabled={Number(product.stock) <= 0}
+                      onClick={() => addToCart(product)}
+                    >
+                      Add to Bag +
+                    </button>
+
+                    <button
+                      className="view-product-button"
+                      onClick={() => setSelectedProduct(product)}
+                      aria-label="View product details"
+                    >
+                      View
+                    </button>
+                  </div>
                 </div>
-              )}
-            </>
-          )}
+              </article>
+            ))}
+          </div>
         </section>
 
-        {/* Newsletter */}
-        <section className="newsletter">
-          <span className="eyebrow">
-            STAY IN THE LOOP
-          </span>
-
-          <h2>Good things are coming.</h2>
-
-          <p>
-            Discover new arrivals and exclusive offers.
-          </p>
+        {/* NEWSLETTER */}
+        <section className="newsletter-section">
+          <div>
+            <span>STAY CONNECTED</span>
+            <h2>Discover More. Waste Less.</h2>
+            <p>
+              Shop with purpose and make every purchase count.
+            </p>
+          </div>
 
           <a href="#products" className="primary-button">
-            Explore Products →
+            Start Shopping →
           </a>
         </section>
 
       </main>
 
-      {/* Footer */}
-      <footer id="footer">
-        <a href="#home" className="logo">
-          cumilla recycle shop<span>.</span>
-        </a>
+      {/* FOOTER */}
+      <footer className="footer" id="contact">
+        <div className="footer-content">
+          <div className="footer-brand">
+            <a href="#" className="logo">
+              <span className="logo-icon">♻</span>
+              <span>
+                <strong>CUMILLA</strong>
+                <small>RECYCLE SHOP</small>
+              </span>
+            </a>
 
-        <p>Simple choices. Better everyday living.</p>
+            <p>
+              Giving useful products a second life.
+              Shop smart, save money and support a greener future.
+            </p>
+          </div>
 
-        <small>
-          © 2026 CUMILLA RECYCLE SHOP. All rights reserved.
-        </small>
+          <div className="footer-links">
+            <h3>Quick Links</h3>
+            <a href="#">Home</a>
+            <a href="#products">Products</a>
+            <a href="#features">About Us</a>
+            <a href="#contact">Contact</a>
+          </div>
+
+          <div className="footer-links">
+            <h3>Customer Support</h3>
+            <a href="#products">Shop Now</a>
+            <a href="#contact">Contact Us</a>
+            <a href="/admin">Admin Login</a>
+          </div>
+        </div>
+
+        <div className="footer-bottom">
+          <p>
+            © {new Date().getFullYear()} Cumilla Recycle Shop.
+            All rights reserved.
+          </p>
+          <span>♻ Reduce • Reuse • Recycle</span>
+        </div>
       </footer>
 
-      {/* Product Details */}
+      {/* PRODUCT DETAILS MODAL */}
       {selectedProduct && (
         <div
-          className="cart-overlay"
+          className="modal-overlay"
           onClick={() => setSelectedProduct(null)}
         >
           <div
@@ -535,47 +640,58 @@ function App() {
               className="modal-close"
               onClick={() => setSelectedProduct(null)}
             >
-              ✕
+              ×
             </button>
 
-            <img
-              src={selectedProduct.image}
-              alt={selectedProduct.name}
-            />
+            <div className="modal-product-image">
+              {selectedProduct.image_url ||
+              selectedProduct.image ? (
+                <img
+                  src={
+                    selectedProduct.image_url ||
+                    selectedProduct.image
+                  }
+                  alt={selectedProduct.name}
+                />
+              ) : (
+                <span>♻</span>
+              )}
+            </div>
 
-            <div className="modal-info">
-              <span className="product-category">
-                {selectedProduct.category}
+            <div className="modal-product-info">
+              <span>
+                {selectedProduct.category || "General"}
               </span>
 
               <h2>{selectedProduct.name}</h2>
 
-              <strong>
-                {money(selectedProduct.price)}
-              </strong>
-
-              <p>{selectedProduct.description}</p>
+              <h3>{money(selectedProduct.price)}</h3>
 
               <p>
-                Available stock: {selectedProduct.stock}
+                {selectedProduct.description ||
+                  "A quality product from Cumilla Recycle Shop."}
+              </p>
+
+              <p>
+                Stock: {selectedProduct.stock || 0}
               </p>
 
               <button
-                className="checkout-button"
-                onClick={() => addToCart(selectedProduct)}
+                className="primary-button"
                 disabled={Number(selectedProduct.stock) <= 0}
+                onClick={() => addToCart(selectedProduct)}
               >
-                Add to Shopping Bag
+                Add to Bag
               </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Shopping Cart */}
+      {/* SHOPPING CART */}
       {cartOpen && (
         <div
-          className="cart-overlay"
+          className="modal-overlay cart-overlay"
           onClick={() => setCartOpen(false)}
         >
           <div
@@ -583,107 +699,113 @@ function App() {
             onClick={(e) => e.stopPropagation()}
           >
             <div className="cart-header">
-              <h2>
-                Your Shopping Bag ({totalItems})
-              </h2>
+              <div>
+                <span>YOUR SHOPPING</span>
+                <h2>My Bag ({totalItems})</h2>
+              </div>
 
-              <button onClick={() => setCartOpen(false)}>
-                ✕
+              <button
+                className="modal-close"
+                onClick={() => setCartOpen(false)}
+              >
+                ×
               </button>
             </div>
 
             {cart.length === 0 ? (
-              <p className="empty-cart">
-                Your shopping bag is empty.
-              </p>
+              <div className="empty-cart">
+                <span>🛍️</span>
+                <h3>Your bag is empty</h3>
+                <p>Add some products to get started.</p>
+
+                <button
+                  className="primary-button"
+                  onClick={() => setCartOpen(false)}
+                >
+                  Continue Shopping
+                </button>
+              </div>
             ) : (
               <>
-                {cart.map((item) => (
-                  <div className="cart-item" key={item.id}>
-                    <img
-                      src={item.image}
-                      alt={item.name}
-                    />
+                <div className="cart-items">
+                  {cart.map((item) => (
+                    <div className="cart-item" key={item.id}>
+                      <div className="cart-item-image">
+                        {item.image_url || item.image ? (
+                          <img
+                            src={item.image_url || item.image}
+                            alt={item.name}
+                          />
+                        ) : (
+                          <span>♻</span>
+                        )}
+                      </div>
 
-                    <div className="cart-item-info">
-                      <strong>{item.name}</strong>
+                      <div className="cart-item-info">
+                        <h3>{item.name}</h3>
+                        <strong>{money(item.price)}</strong>
 
-                      <p>{money(item.price)}</p>
+                        <div className="quantity-controls">
+                          <button
+                            onClick={() =>
+                              changeQuantity(item.id, -1)
+                            }
+                          >
+                            −
+                          </button>
 
-                      <div className="quantity-control">
-                        <button
-                          onClick={() =>
-                            changeQuantity(item.id, -1)
-                          }
-                        >
-                          −
-                        </button>
+                          <span>{item.quantity}</span>
 
-                        <span>{item.quantity}</span>
-
-                        <button
-                          onClick={() =>
-                            changeQuantity(item.id, 1)
-                          }
-                        >
-                          +
-                        </button>
+                          <button
+                            onClick={() =>
+                              changeQuantity(item.id, 1)
+                            }
+                          >
+                            +
+                          </button>
+                        </div>
                       </div>
 
                       <button
-                        className="remove-button"
-                        onClick={() =>
-                          removeFromCart(item.id)
-                        }
+                        className="remove-item"
+                        onClick={() => removeFromCart(item.id)}
                       >
                         Remove
                       </button>
                     </div>
+                  ))}
+                </div>
 
-                    <strong className="item-total">
-                      {money(item.price * item.quantity)}
-                    </strong>
-                  </div>
-                ))}
-
-                <div className="order-summary">
-                  <h3>Order Summary</h3>
-
+                <div className="cart-summary">
                   <div>
                     <span>Subtotal</span>
                     <strong>{money(subtotal)}</strong>
                   </div>
 
                   <div>
-                    <span>Delivery Charge</span>
+                    <span>Delivery</span>
                     <strong>
-                      {delivery === 0
-                        ? "FREE"
-                        : money(delivery)}
+                      {delivery === 0 ? "FREE" : money(delivery)}
                     </strong>
                   </div>
 
-                  <div className="summary-total">
-                    <strong>Total</strong>
+                  <div className="cart-total">
+                    <span>Total</span>
                     <strong>{money(total)}</strong>
                   </div>
 
-                  {subtotal > 0 && subtotal < 3000 && (
-                    <p className="delivery-note">
-                      Add {money(3000 - subtotal)} more
-                      for free delivery!
-                    </p>
-                  )}
+                  <p>
+                    Free delivery on orders above ৳3,000.
+                  </p>
 
                   <button
                     className="checkout-button"
                     onClick={() => {
                       setCartOpen(false);
                       setCheckoutOpen(true);
-                      setOrderError("");
                     }}
                   >
-                    Continue to Checkout →
+                    Proceed to Checkout →
                   </button>
                 </div>
               </>
@@ -692,214 +814,194 @@ function App() {
         </div>
       )}
 
-      {/* Checkout */}
+      {/* CHECKOUT */}
       {checkoutOpen && (
-        <div className="checkout-overlay">
-          <div className="checkout-container">
+        <div className="modal-overlay checkout-overlay">
+          <div className="checkout-modal">
+            <div className="checkout-header">
+              <div>
+                <span>ALMOST THERE</span>
+                <h2>Checkout</h2>
+              </div>
 
-            {!orderPlaced ? (
-              <>
-                <div className="checkout-heading">
-                  <div>
-                    <span className="eyebrow">
-                      CUMILLA RECYCLE SHOP
-                    </span>
+              <button
+                className="modal-close"
+                onClick={closeCheckout}
+              >
+                ×
+              </button>
+            </div>
 
-                    <h2>Complete your order.</h2>
-
-                    <p>
-                      Enter your delivery information below.
-                    </p>
-                  </div>
-
-                  <button
-                    className="modal-close"
-                    onClick={() => setCheckoutOpen(false)}
-                    disabled={orderSubmitting}
-                  >
-                    ✕
-                  </button>
-                </div>
-
-                <form
-                  className="checkout-form"
-                  onSubmit={handleOrder}
-                >
-                  {orderError && (
-                    <div className="admin-error" role="alert">
-                      {orderError}
-                    </div>
-                  )}
-
-                  <h3>01. Contact Information</h3>
-
-                  <label>Full Name *</label>
-
-                  <input
-                    name="name"
-                    placeholder="Enter your full name"
-                    required
-                  />
-
-                  <label>Mobile Number *</label>
-
-                  <input
-                    name="phone"
-                    type="tel"
-                    placeholder="01XXXXXXXXX"
-                    pattern="01[0-9]{9}"
-                    title="Enter a valid 11-digit Bangladesh mobile number"
-                    required
-                  />
-
-                  <label>Email Address (Optional)</label>
-
-                  <input
-                    name="email"
-                    type="email"
-                    placeholder="your@email.com"
-                  />
-
-                  <h3>02. Delivery Address</h3>
-
-                  <label>District *</label>
-
-                  <input
-                    name="district"
-                    placeholder="e.g. Cumilla"
-                    required
-                  />
-
-                  <label>Full Address *</label>
-
-                  <textarea
-                    name="address"
-                    placeholder="House, Road, Area, Post Office..."
-                    rows="4"
-                    required
-                  />
-
-                  <h3>03. Payment Method</h3>
-
-                  <div className="payment-option">
-                    <input
-                      type="radio"
-                      name="payment"
-                      value="Cash on Delivery"
-                      defaultChecked
-                    />
-
-                    <div>
-                      <strong>Cash on Delivery</strong>
-                      <p>Pay when your order arrives.</p>
-                    </div>
-                  </div>
-
-                  <div className="checkout-total">
-                    <span>Total Amount</span>
-                    <strong>{money(total)}</strong>
-                  </div>
-
-                  <button
-                    className="checkout-button"
-                    type="submit"
-                    disabled={orderSubmitting}
-                  >
-                    {orderSubmitting
-                      ? "Placing Order..."
-                      : "Place Order →"}
-                  </button>
-
-                  <button
-                    type="button"
-                    className="back-button"
-                    disabled={orderSubmitting}
-                    onClick={() => {
-                      setCheckoutOpen(false);
-                      setCartOpen(true);
-                    }}
-                  >
-                    Back to Shopping Bag
-                  </button>
-                </form>
-              </>
-            ) : (
+            {orderPlaced && orderInfo ? (
               <div className="order-success">
-
                 <div className="success-icon">✓</div>
 
-                <span className="eyebrow">
-                  ORDER CONFIRMATION
-                </span>
-
-                <h2>
-                  Thank you, {orderInfo?.name}!
-                </h2>
+                <h2>Order Placed Successfully!</h2>
 
                 <p>
-                  Your order has been submitted successfully.
-                  We will contact you soon.
+                  Thank you for shopping with Cumilla Recycle Shop.
                 </p>
 
-                {orderInfo?.emailSent === false && (
-                  <p>
-                    Your order was saved, but the store notification
-                    email could not be sent.
-                  </p>
-                )}
-
-                <div className="success-details">
+                <div className="order-details">
                   <div>
                     <span>Order ID</span>
-                    <strong>CRS-{orderInfo?.orderId}</strong>
+                    <strong>{orderInfo.orderId}</strong>
                   </div>
 
                   <div>
-                    <span>Order Status</span>
-                    <strong>Pending</strong>
+                    <span>Name</span>
+                    <strong>{orderInfo.name}</strong>
                   </div>
 
                   <div>
-                    <span>Mobile Number</span>
-                    <strong>{orderInfo?.phone}</strong>
+                    <span>Phone</span>
+                    <strong>{orderInfo.phone}</strong>
                   </div>
 
                   <div>
-                    <span>Delivery District</span>
-                    <strong>{orderInfo?.district}</strong>
+                    <span>District</span>
+                    <strong>{orderInfo.district}</strong>
                   </div>
 
                   <div>
                     <span>Items</span>
-                    <strong>{orderInfo?.items}</strong>
+                    <strong>{orderInfo.items}</strong>
                   </div>
 
                   <div>
-                    <span>Total Amount</span>
-                    <strong>{money(orderInfo?.total)}</strong>
+                    <span>Total</span>
+                    <strong>{money(orderInfo.total)}</strong>
                   </div>
 
                   <div>
                     <span>Payment</span>
-                    <strong>Cash on Delivery</strong>
+                    <strong>{orderInfo.payment}</strong>
+                  </div>
+
+                  <div>
+                    <span>Status</span>
+                    <strong>Pending</strong>
                   </div>
                 </div>
 
                 <button
                   className="checkout-button"
-                  onClick={() => {
-                    setCheckoutOpen(false);
-                    setOrderPlaced(false);
-                    setOrderInfo(null);
-                    setOrderError("");
-                  }}
+                  onClick={closeCheckout}
                 >
-                  Continue Shopping →
+                  Continue Shopping
+                </button>
+              </div>
+            ) : (
+              <form
+                className="checkout-form"
+                onSubmit={handleOrder}
+              >
+                <h3>Delivery Information</h3>
+
+                <label>
+                  Full Name *
+                  <input
+                    type="text"
+                    name="name"
+                    placeholder="Enter your full name"
+                    required
+                  />
+                </label>
+
+                <label>
+                  Phone Number *
+                  <input
+                    type="tel"
+                    name="phone"
+                    placeholder="01XXXXXXXXX"
+                    pattern="01[0-9]{9}"
+                    maxLength="11"
+                    required
+                  />
+                </label>
+
+                <label>
+                  Email Address
+                  <input
+                    type="email"
+                    name="email"
+                    placeholder="your@email.com"
+                  />
+                </label>
+
+                <label>
+                  District *
+                  <input
+                    type="text"
+                    name="district"
+                    placeholder="Enter your district"
+                    required
+                  />
+                </label>
+
+                <label>
+                  Full Delivery Address *
+                  <textarea
+                    name="address"
+                    placeholder="House, road, area and other details"
+                    rows="3"
+                    required
+                  />
+                </label>
+
+                <h3>Payment Method</h3>
+
+                <label className="payment-option">
+                  <input
+                    type="radio"
+                    name="payment"
+                    value="Cash on Delivery"
+                    defaultChecked
+                  />
+                  <span>
+                    <strong>Cash on Delivery</strong>
+                    <small>Pay when your order arrives.</small>
+                  </span>
+                </label>
+
+                <div className="checkout-total">
+                  <span>Subtotal</span>
+                  <strong>{money(subtotal)}</strong>
+                </div>
+
+                <div className="checkout-total">
+                  <span>Delivery Charge</span>
+                  <strong>
+                    {delivery === 0 ? "FREE" : money(delivery)}
+                  </strong>
+                </div>
+
+                <div className="checkout-total grand-total">
+                  <span>Total Amount</span>
+                  <strong>{money(total)}</strong>
+                </div>
+
+                {orderError && (
+                  <div className="error-message">
+                    {orderError}
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  className="checkout-button"
+                  disabled={orderSubmitting || cart.length === 0}
+                >
+                  {orderSubmitting
+                    ? "Placing Your Order..."
+                    : `Confirm Order — ${money(total)}`}
                 </button>
 
-              </div>
+                <p className="checkout-note">
+                  Your order will be submitted securely.
+                </p>
+              </form>
             )}
-
           </div>
         </div>
       )}
