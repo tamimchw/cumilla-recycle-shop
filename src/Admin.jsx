@@ -7,6 +7,11 @@ import {
   Html5QrcodeSupportedFormats,
 } from "html5-qrcode";
 import { supabase } from "./supabase";
+import {
+  deliveryZones,
+  findDeliverySetting,
+  getValidDeliveryCharge,
+} from "./deliverySettings";
 import "./Admin.css";
 
 const money = (amount) =>
@@ -18,7 +23,8 @@ const money = (amount) =>
 const emptyProduct = {
   name: "",
   description: "",
-  category: "Plastic",
+  category: "",
+  subcategory: "",
   price: "",
   stock: "",
   barcode: "",
@@ -28,7 +34,8 @@ const emptyProduct = {
 const emptyPurchase = {
   purchase_date: new Date().toISOString().slice(0, 10),
   product_name: "",
-  category: "Plastic",
+  category: "",
+  subcategory: "",
   buy_price: "",
   quantity: "",
   unit: "kg",
@@ -43,6 +50,14 @@ export default function Admin() {
 
   const [products, setProducts] = useState([]);
   const [purchases, setPurchases] = useState([]);
+  const [categories, setCategories] = useState([]);
+  const [categoriesLoading, setCategoriesLoading] = useState(false);
+  const [categoryForm, setCategoryForm] = useState({ name: "", parent_id: "" });
+  const [editingCategory, setEditingCategory] = useState(null);
+  const [editingCategoryName, setEditingCategoryName] = useState("");
+  const [deliverySettings, setDeliverySettings] = useState([]);
+  const [deliveryChargeDrafts, setDeliveryChargeDrafts] = useState({});
+  const [deliverySettingsLoading, setDeliverySettingsLoading] = useState(false);
   const [orders, setOrders] = useState([]);
   const [sales, setSales] = useState([]);
   const [banners, setBanners] = useState([]);
@@ -64,6 +79,7 @@ export default function Admin() {
   const [saleCustomerName, setSaleCustomerName] = useState("");
   const [salePhone, setSalePhone] = useState("");
   const [salePayment, setSalePayment] = useState("Cash");
+  const [salePaidAmount, setSalePaidAmount] = useState("");
   const [savingSale, setSavingSale] = useState(false);
   const [selectedSale, setSelectedSale] = useState(null);
 
@@ -191,6 +207,46 @@ export default function Admin() {
     setProducts(data || []);
   }
 
+  async function loadCategories() {
+    setCategoriesLoading(true);
+    try {
+      const { data, error } = await supabase
+        .from("categories")
+        .select("*")
+        .order("sort_order");
+
+      if (error) throw error;
+      setCategories(data || []);
+    } finally {
+      setCategoriesLoading(false);
+    }
+  }
+
+  async function loadDeliverySettings() {
+    setDeliverySettingsLoading(true);
+    try {
+      const { data, error } = await supabase
+        .from("delivery_settings")
+        .select("*")
+        .order("district");
+
+      if (error) throw error;
+
+      const settings = data || [];
+      setDeliverySettings(settings);
+      setDeliveryChargeDrafts(
+        Object.fromEntries(
+          settings.map((setting) => [
+            String(setting.id),
+            String(setting.delivery_charge ?? ""),
+          ])
+        )
+      );
+    } finally {
+      setDeliverySettingsLoading(false);
+    }
+  }
+
   async function loadPurchases() {
     const { data, error } = await supabase
       .from("purchases")
@@ -248,6 +304,45 @@ export default function Admin() {
     setSelectedOrder((current) =>
       current && current.id === orderId
         ? { ...current, status: newStatus }
+        : current
+    );
+  }
+
+  async function toggleOrderFreeDelivery(order) {
+    const nextFreeDelivery = !Boolean(order.free_delivery);
+    const subtotal = Number(order.subtotal || 0);
+    const deliveryCharge = Number(order.delivery_charge || 0);
+    const nextTotal = subtotal + (nextFreeDelivery ? 0 : deliveryCharge);
+
+    setError("");
+    setMessage("");
+    setUpdatingOrderId(order.id);
+
+    const { error } = await supabase
+      .from("orders")
+      .update({
+        free_delivery: nextFreeDelivery,
+        total: nextTotal,
+      })
+      .eq("id", order.id);
+
+    setUpdatingOrderId(null);
+
+    if (error) {
+      setError("Could not update free delivery: " + error.message);
+      return;
+    }
+
+    setMessage(
+      nextFreeDelivery
+        ? `Free delivery applied to Order #${order.id}.`
+        : `Standard delivery charge restored for Order #${order.id}.`
+    );
+
+    await loadOrders();
+    setSelectedOrder((current) =>
+      current && current.id === order.id
+        ? { ...current, free_delivery: nextFreeDelivery, total: nextTotal }
         : current
     );
   }
@@ -349,6 +444,8 @@ export default function Admin() {
     try {
       await Promise.all([
         loadProducts(),
+        loadCategories(),
+        loadDeliverySettings(),
         loadPurchases(),
         loadOrders(),
         loadSales(),
@@ -359,6 +456,157 @@ export default function Admin() {
     }
 
     setLoading(false);
+  }
+
+  function categoryNameExists(name, parentId, excludedId = null) {
+    const normalizedName = name.trim().toLowerCase();
+    return categories.some((category) => {
+      const sameParent =
+        (category.parent_id == null ? "" : String(category.parent_id)) ===
+        (parentId == null ? "" : String(parentId));
+      return (
+        category.id !== excludedId &&
+        sameParent &&
+        category.name.trim().toLowerCase() === normalizedName
+      );
+    });
+  }
+
+  async function saveCategory(e) {
+    e.preventDefault();
+    setError("");
+    setMessage("");
+
+    const name = categoryForm.name.trim();
+    const parentId = categoryForm.parent_id || null;
+    if (!name) {
+      setError("Please enter a category name.");
+      return;
+    }
+    if (categoryNameExists(name, parentId)) {
+      setError("A category with this name already exists under the selected parent.");
+      return;
+    }
+
+    const siblingOrders = categories
+      .filter(
+        (category) =>
+          (category.parent_id == null ? "" : String(category.parent_id)) ===
+          (parentId == null ? "" : String(parentId))
+      )
+      .map((category) => Number(category.sort_order))
+      .filter(Number.isFinite);
+
+    setLoading(true);
+    try {
+      const { error } = await supabase.from("categories").insert([
+        {
+          name,
+          parent_id: parentId,
+          is_active: true,
+          sort_order: siblingOrders.length
+            ? Math.max(...siblingOrders) + 1
+            : 0,
+        },
+      ]);
+      if (error) throw error;
+
+      setCategoryForm({ name: "", parent_id: "" });
+      setMessage(parentId ? "Subcategory added successfully." : "Category added successfully.");
+      await loadCategories();
+    } catch (err) {
+      setError(err.message || "Could not save category.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function updateCategoryName(category) {
+    setError("");
+    setMessage("");
+    const name = editingCategoryName.trim();
+    if (!name) {
+      setError("Please enter a category name.");
+      return;
+    }
+    if (categoryNameExists(name, category.parent_id, category.id)) {
+      setError("A category with this name already exists under the same parent.");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const { error } = await supabase
+        .from("categories")
+        .update({ name })
+        .eq("id", category.id);
+      if (error) throw error;
+
+      setEditingCategory(null);
+      setEditingCategoryName("");
+      setMessage("Category name updated successfully.");
+      await loadCategories();
+    } catch (err) {
+      setError(err.message || "Could not update category.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function toggleCategoryActive(category) {
+    setError("");
+    setMessage("");
+    setLoading(true);
+    try {
+      const { error } = await supabase
+        .from("categories")
+        .update({ is_active: !category.is_active })
+        .eq("id", category.id);
+      if (error) throw error;
+
+      setMessage(
+        category.is_active
+          ? "Category deactivated successfully."
+          : "Category activated successfully."
+      );
+      await loadCategories();
+    } catch (err) {
+      setError(err.message || "Could not update category status.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function saveDeliveryCharge(setting) {
+    setError("");
+    setMessage("");
+
+    const rawCharge = deliveryChargeDrafts[String(setting.id)] ?? "";
+    const charge = Number(rawCharge);
+    if (
+      String(rawCharge).trim() === "" ||
+      !Number.isFinite(charge) ||
+      charge < 0
+    ) {
+      setError("Enter a valid delivery charge of zero or more.");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const { error } = await supabase
+        .from("delivery_settings")
+        .update({ delivery_charge: charge })
+        .eq("id", setting.id);
+      if (error) throw error;
+
+      setMessage(`${setting.district} delivery charge saved successfully.`);
+      await loadDeliverySettings();
+    } catch (err) {
+      setError(err.message || "Could not save delivery charge.");
+    } finally {
+      setLoading(false);
+    }
   }
 
   useEffect(() => {
@@ -610,10 +858,12 @@ export default function Admin() {
   // PRODUCT FUNCTIONS
 
   function updateProductField(e) {
-    setProductForm({
-      ...productForm,
-      [e.target.name]: e.target.value,
-    });
+    const { name, value } = e.target;
+    setProductForm((current) => ({
+      ...current,
+      [name]: value,
+      ...(name === "category" ? { subcategory: "" } : {}),
+    }));
   }
 
   async function saveProduct(e) {
@@ -645,6 +895,7 @@ export default function Admin() {
         name,
         description: productForm.description.trim(),
         category: productForm.category,
+        subcategory: productForm.subcategory || null,
         price,
         stock,
         barcode: productForm.barcode.trim() || null,
@@ -687,7 +938,8 @@ export default function Admin() {
     setProductForm({
       name: product.name || "",
       description: product.description || "",
-      category: product.category || "Plastic",
+      category: product.category || "",
+      subcategory: product.subcategory || "",
       price: String(product.price ?? ""),
       stock: String(product.stock ?? ""),
       barcode: product.barcode || "",
@@ -790,10 +1042,12 @@ export default function Admin() {
   // PURCHASE FUNCTIONS
 
   function updatePurchaseField(e) {
-    setPurchaseForm({
-      ...purchaseForm,
-      [e.target.name]: e.target.value,
-    });
+    const { name, value } = e.target;
+    setPurchaseForm((current) => ({
+      ...current,
+      [name]: value,
+      ...(name === "category" ? { subcategory: "" } : {}),
+    }));
   }
 
   async function savePurchase(e) {
@@ -805,6 +1059,7 @@ export default function Admin() {
       purchase_date: purchaseForm.purchase_date,
       product_name: purchaseForm.product_name.trim(),
       category: purchaseForm.category,
+      subcategory: purchaseForm.subcategory || null,
       buy_price: Number(purchaseForm.buy_price),
       quantity: Number(purchaseForm.quantity),
       unit: purchaseForm.unit,
@@ -985,7 +1240,8 @@ export default function Admin() {
     setPurchaseForm({
       purchase_date: item.purchase_date,
       product_name: item.product_name,
-      category: item.category,
+      category: item.category || "",
+      subcategory: item.subcategory || "",
       buy_price: String(item.buy_price),
       quantity: String(item.quantity),
       unit: item.unit,
@@ -1100,6 +1356,7 @@ export default function Admin() {
     setSaleCustomerName("");
     setSalePhone("");
     setSalePayment("Cash");
+    setSalePaidAmount("");
   }
 
   async function createDirectSale(e) {
@@ -1121,6 +1378,12 @@ export default function Admin() {
       }
     }
 
+    const paidAmount = Number(salePaidAmount === "" ? saleSubtotal : salePaidAmount);
+    if (!Number.isFinite(paidAmount) || paidAmount < 0 || paidAmount > saleSubtotal) {
+      setError("Paid Amount must be between ৳0 and the Grand Total.");
+      return;
+    }
+
     setError("");
     setMessage("");
     setSavingSale(true);
@@ -1136,6 +1399,7 @@ export default function Admin() {
             product_id: item.product_id,
             quantity: Number(item.quantity),
           })),
+          p_paid_amount: paidAmount,
         }
       );
 
@@ -1146,6 +1410,9 @@ export default function Admin() {
         customer_name: saleCustomerName.trim() || "Walk-in Customer",
         phone: salePhone.trim() || "",
         payment_method: salePayment,
+        paid_amount: Number(data.paid_amount ?? paidAmount),
+        due_amount: Number(data.due_amount ?? Math.max(0, saleSubtotal - paidAmount)),
+        payment_status: data.payment_status ?? (paidAmount >= saleSubtotal ? "paid" : paidAmount > 0 ? "partial" : "unpaid"),
         created_at: new Date().toISOString(),
       };
 
@@ -1494,7 +1761,12 @@ export default function Admin() {
                   ${escapeInvoiceText(sale.payment_method || "Cash")}
                 </p>
 
-                <p>Status: Paid</p>
+                <p>Paid Amount: ${money(sale.paid_amount ?? sale.total)}</p>
+                <p>Due Amount: ${money(sale.due_amount ?? 0)}</p>
+                <p>Status: ${escapeInvoiceText(
+                  sale.payment_status === "paid" ? "Paid" :
+                  sale.payment_status === "partial" ? "Partial" : "Due"
+                )}</p>
               </div>
 
             </div>
@@ -1525,6 +1797,16 @@ export default function Admin() {
               <div class="total-row grand-total">
                 <span>Grand Total</span>
                 <strong>${money(sale.total)}</strong>
+              </div>
+
+              <div class="total-row">
+                <span>Paid Amount</span>
+                <strong>${money(sale.paid_amount ?? sale.total)}</strong>
+              </div>
+
+              <div class="total-row">
+                <span>Due Amount</span>
+                <strong>${money(sale.due_amount ?? 0)}</strong>
               </div>
 
             </div>
@@ -1654,6 +1936,8 @@ export default function Admin() {
   const navigation = [
     { id: "dashboard", label: "Overview", icon: "◫" },
     { id: "products", label: "Products", icon: "▦" },
+    { id: "categories", label: "Categories", icon: "▤" },
+    { id: "delivery-settings", label: "Delivery Settings", icon: "🚚" },
     { id: "banners", label: "Offer Banners", icon: "🖼️" },
     { id: "purchases", label: "Purchases", icon: "🛒" },
     { id: "orders", label: "Orders", icon: "▤" },
@@ -1669,6 +1953,101 @@ export default function Admin() {
     (Number(purchaseForm.selling_price || 0) -
       Number(purchaseForm.buy_price || 0)) *
     Number(purchaseForm.quantity || 0);
+
+  const mainCategories = categories.filter(
+    (category) => category.parent_id == null
+  );
+  const activeMainCategories = mainCategories.filter(
+    (category) => category.is_active
+  );
+  const productMainCategory = activeMainCategories.find(
+    (category) => category.name === productForm.category
+  );
+  const purchaseMainCategory = activeMainCategories.find(
+    (category) => category.name === purchaseForm.category
+  );
+  const productSubcategories = categories.filter(
+    (category) =>
+      category.is_active &&
+      productMainCategory &&
+      String(category.parent_id) === String(productMainCategory.id)
+  );
+  const purchaseSubcategories = categories.filter(
+    (category) =>
+      category.is_active &&
+      purchaseMainCategory &&
+      String(category.parent_id) === String(purchaseMainCategory.id)
+  );
+
+  function renderCategoryRow(category) {
+    const isEditing = editingCategory === category.id;
+    return (
+      <div
+        className={`admin-category-row${category.parent_id == null ? "" : " admin-category-subrow"}`}
+        key={category.id}
+      >
+        <div className="admin-category-name">
+          {isEditing ? (
+            <input
+              value={editingCategoryName}
+              onChange={(e) => setEditingCategoryName(e.target.value)}
+              aria-label={`Edit ${category.name} name`}
+            />
+          ) : (
+            <strong>{category.name}</strong>
+          )}
+          <span className={category.is_active ? "active" : "inactive"}>
+            {category.is_active ? "Active" : "Inactive"}
+          </span>
+        </div>
+        <div className="admin-category-actions">
+          {isEditing ? (
+            <>
+              <button
+                type="button"
+                className="admin-secondary-button"
+                onClick={() => updateCategoryName(category)}
+                disabled={loading}
+              >
+                Save
+              </button>
+              <button
+                type="button"
+                className="admin-secondary-button"
+                onClick={() => {
+                  setEditingCategory(null);
+                  setEditingCategoryName("");
+                }}
+                disabled={loading}
+              >
+                Cancel
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              className="admin-secondary-button"
+              onClick={() => {
+                setEditingCategory(category.id);
+                setEditingCategoryName(category.name);
+              }}
+              disabled={loading}
+            >
+              Edit
+            </button>
+          )}
+          <button
+            type="button"
+            className="admin-secondary-button"
+            onClick={() => toggleCategoryActive(category)}
+            disabled={loading}
+          >
+            {category.is_active ? "Deactivate" : "Activate"}
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   // ==========================================
   // MAIN ADMIN PANEL
@@ -1721,6 +2100,10 @@ export default function Admin() {
                 ? "Offer Banners"
                 : page === "products"
                 ? "Products"
+                : page === "categories"
+                ? "Categories"
+                : page === "delivery-settings"
+                ? "Delivery Settings"
                 : page === "purchases"
                 ? "Purchases"
                 : page === "orders"
@@ -1868,6 +2251,164 @@ export default function Admin() {
         )}
 
 
+        {/* CATEGORIES */}
+        {page === "categories" && (
+          <>
+            <section className="admin-section">
+              <h2>Manage Categories</h2>
+              <p>Create main categories and subcategories for products and purchases.</p>
+
+              <form className="admin-category-form" onSubmit={saveCategory}>
+                <label htmlFor="admin-category-name">Category Name</label>
+                <input
+                  id="admin-category-name"
+                  value={categoryForm.name}
+                  onChange={(e) =>
+                    setCategoryForm((current) => ({
+                      ...current,
+                      name: e.target.value,
+                    }))
+                  }
+                  placeholder="Enter a category name"
+                  required
+                />
+
+                <label htmlFor="admin-category-parent">Parent Category</label>
+                <select
+                  id="admin-category-parent"
+                  value={categoryForm.parent_id}
+                  onChange={(e) =>
+                    setCategoryForm((current) => ({
+                      ...current,
+                      parent_id: e.target.value,
+                    }))
+                  }
+                >
+                  <option value="">Main category (no parent)</option>
+                  {mainCategories.map((category) => (
+                    <option key={category.id} value={category.id}>
+                      {category.name}{category.is_active ? "" : " (inactive)"}
+                    </option>
+                  ))}
+                </select>
+
+                <button
+                  className="admin-primary-button"
+                  disabled={loading}
+                >
+                  {loading ? "Saving..." : "Add Category"}
+                </button>
+              </form>
+            </section>
+
+            <section className="admin-section">
+              <h2>Categories and Subcategories</h2>
+              {categoriesLoading ? (
+                <p className="admin-category-loading">Loading categories...</p>
+              ) : categories.length === 0 ? (
+                <p className="admin-empty">No categories have been created yet.</p>
+              ) : (
+                <div className="admin-category-list">
+                  {mainCategories.map((category) => {
+                    const children = categories.filter(
+                      (child) => String(child.parent_id) === String(category.id)
+                    );
+                    return (
+                      <div className="admin-category-group" key={category.id}>
+                        {renderCategoryRow(category)}
+                        {children.length > 0 && (
+                          <div className="admin-category-children">
+                            {children.map(renderCategoryRow)}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                  {categories
+                    .filter(
+                      (category) =>
+                        category.parent_id != null &&
+                        !mainCategories.some(
+                          (parent) =>
+                            String(parent.id) === String(category.parent_id)
+                        )
+                    )
+                    .map(renderCategoryRow)}
+                </div>
+              )}
+            </section>
+          </>
+        )}
+
+        {/* DELIVERY SETTINGS */}
+        {page === "delivery-settings" && (
+          <section className="admin-section">
+            <h2>Manage Delivery Charges</h2>
+            <p>Update the delivery charge used for each delivery zone.</p>
+
+            {deliverySettingsLoading ? (
+              <p className="admin-delivery-loading">Loading delivery settings...</p>
+            ) : (
+              <div className="admin-delivery-settings">
+                {deliveryZones.map((zone) => {
+                  const setting = findDeliverySetting(deliverySettings, zone.key);
+                  const savedCharge = getValidDeliveryCharge(setting);
+                  return (
+                    <div className="admin-delivery-row" key={zone.key}>
+                      <div className="admin-delivery-zone">
+                        <strong>{zone.label}</strong>
+                        {setting && (
+                          <span className={setting.is_active ? "active" : "inactive"}>
+                            {setting.is_active ? "Active" : "Inactive"}
+                          </span>
+                        )}
+                        {!setting && (
+                          <span className="inactive">Not configured</span>
+                        )}
+                      </div>
+                      <label>
+                        Delivery Charge (৳)
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={
+                            setting
+                              ? deliveryChargeDrafts[String(setting.id)] ?? ""
+                              : ""
+                          }
+                          onChange={(e) =>
+                            setting &&
+                            setDeliveryChargeDrafts((current) => ({
+                              ...current,
+                              [String(setting.id)]: e.target.value,
+                            }))
+                          }
+                          disabled={!setting || loading}
+                          aria-label={`${zone.label} delivery charge`}
+                        />
+                        {setting && savedCharge === null && (
+                          <small className="admin-delivery-warning">
+                            The saved charge is invalid. Enter a valid amount.
+                          </small>
+                        )}
+                      </label>
+                      <button
+                        type="button"
+                        className="admin-primary-button"
+                        onClick={() => setting && saveDeliveryCharge(setting)}
+                        disabled={!setting || loading}
+                      >
+                        {loading ? "Saving..." : "Save Charge"}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+        )}
+
         {/* PRODUCTS */}
 
         {page === "products" && (
@@ -1905,17 +2446,44 @@ export default function Admin() {
                   name="category"
                   value={productForm.category}
                   onChange={updateProductField}
+                  required
                 >
-                  <option>Plastic</option>
-                  <option>Iron</option>
-                  <option>Copper</option>
-                  <option>Aluminum</option>
-                  <option>Paper</option>
-                  <option>Glass</option>
-                  <option>Fashion</option>
-                  <option>Electronics</option>
-                  <option>Accessories</option>
-                  <option>Other</option>
+                  <option value="">Select a category</option>
+                  {activeMainCategories.map((category) => (
+                    <option key={category.id} value={category.name}>
+                      {category.name}
+                    </option>
+                  ))}
+                  {productForm.category &&
+                    !activeMainCategories.some(
+                      (category) => category.name === productForm.category
+                    ) && (
+                      <option value={productForm.category}>
+                        {productForm.category} (legacy)
+                      </option>
+                    )}
+                </select>
+
+                <label>Subcategory</label>
+                <select
+                  name="subcategory"
+                  value={productForm.subcategory}
+                  onChange={updateProductField}
+                >
+                  <option value="">No subcategory</option>
+                  {productSubcategories.map((category) => (
+                    <option key={category.id} value={category.name}>
+                      {category.name}
+                    </option>
+                  ))}
+                  {productForm.subcategory &&
+                    !productSubcategories.some(
+                      (category) => category.name === productForm.subcategory
+                    ) && (
+                      <option value={productForm.subcategory}>
+                        {productForm.subcategory} (legacy)
+                      </option>
+                    )}
                 </select>
 
                 <div className="admin-form-row">
@@ -2188,14 +2756,44 @@ export default function Admin() {
                   name="category"
                   value={purchaseForm.category}
                   onChange={updatePurchaseField}
+                  required
                 >
-                  <option>Plastic</option>
-                  <option>Iron</option>
-                  <option>Copper</option>
-                  <option>Aluminum</option>
-                  <option>Paper</option>
-                  <option>Glass</option>
-                  <option>Other</option>
+                  <option value="">Select a category</option>
+                  {activeMainCategories.map((category) => (
+                    <option key={category.id} value={category.name}>
+                      {category.name}
+                    </option>
+                  ))}
+                  {purchaseForm.category &&
+                    !activeMainCategories.some(
+                      (category) => category.name === purchaseForm.category
+                    ) && (
+                      <option value={purchaseForm.category}>
+                        {purchaseForm.category} (legacy)
+                      </option>
+                    )}
+                </select>
+
+                <label>Subcategory</label>
+                <select
+                  name="subcategory"
+                  value={purchaseForm.subcategory}
+                  onChange={updatePurchaseField}
+                >
+                  <option value="">No subcategory</option>
+                  {purchaseSubcategories.map((category) => (
+                    <option key={category.id} value={category.name}>
+                      {category.name}
+                    </option>
+                  ))}
+                  {purchaseForm.subcategory &&
+                    !purchaseSubcategories.some(
+                      (category) => category.name === purchaseForm.subcategory
+                    ) && (
+                      <option value={purchaseForm.subcategory}>
+                        {purchaseForm.subcategory} (legacy)
+                      </option>
+                    )}
                 </select>
 
                 <div className="admin-form-row">
@@ -2518,6 +3116,18 @@ export default function Admin() {
                   <option value="Bank">Bank</option>
                 </select>
 
+                <label>Paid Amount</label>
+                <input
+                  type="number"
+                  min="0"
+                  max={saleSubtotal}
+                  step="0.01"
+                  value={salePaidAmount === "" ? saleSubtotal : salePaidAmount}
+                  onChange={(e) => setSalePaidAmount(e.target.value)}
+                  placeholder="Enter amount received"
+                />
+                <p>Due Amount: {money(Math.max(0, saleSubtotal - Number(salePaidAmount === "" ? saleSubtotal : salePaidAmount)))}</p>
+
                 <hr />
 
                 <h3>Scan Product Barcode</h3>
@@ -2700,6 +3310,9 @@ export default function Admin() {
                       <th>Phone</th>
                       <th>Payment</th>
                       <th>Total</th>
+                      <th>Paid</th>
+                      <th>Due</th>
+                      <th>Status</th>
                       <th>Date</th>
                       <th>Action</th>
                     </tr>
@@ -2713,6 +3326,9 @@ export default function Admin() {
                         <td>{sale.phone || "N/A"}</td>
                         <td>{sale.payment_method}</td>
                         <td>{money(sale.total)}</td>
+                        <td>{money(sale.paid_amount ?? sale.total)}</td>
+                        <td>{money(sale.due_amount ?? 0)}</td>
+                        <td>{sale.payment_status === "paid" ? "Paid" : sale.payment_status === "partial" ? "Partial" : "Due"}</td>
                         <td>
                           {new Date(sale.created_at).toLocaleDateString("en-BD")}
                         </td>
@@ -2808,8 +3424,21 @@ export default function Admin() {
               <hr />
 
               <p><strong>Subtotal:</strong> {money(selectedOrder.subtotal)}</p>
-              <p><strong>Delivery:</strong> {money(selectedOrder.delivery_charge)}</p>
+              <p><strong>Standard Delivery Charge:</strong> {money(selectedOrder.delivery_charge)}</p>
+              {selectedOrder.free_delivery && (
+                <p><strong>Delivery Discount:</strong> -{money(selectedOrder.delivery_charge)}</p>
+              )}
               <h3>Grand Total: {money(selectedOrder.total)}</h3>
+
+              <label className="admin-checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={Boolean(selectedOrder.free_delivery)}
+                  disabled={updatingOrderId === selectedOrder.id}
+                  onChange={() => toggleOrderFreeDelivery(selectedOrder)}
+                />
+                Apply Free Delivery to this order
+              </label>
 
               <p><strong>Current Status:</strong> {selectedOrder.status}</p>
 
@@ -2854,6 +3483,9 @@ export default function Admin() {
               <h2>{money(selectedSale.total)}</h2>
               <p>Customer: {selectedSale.customer_name}</p>
               <p>Payment: {selectedSale.payment_method}</p>
+              <p>Paid Amount: {money(selectedSale.paid_amount)}</p>
+              <p>Due Amount: {money(selectedSale.due_amount)}</p>
+              <p>Payment Status: {selectedSale.payment_status === "paid" ? "Paid" : selectedSale.payment_status === "partial" ? "Partial" : "Due"}</p>
 
               <button
                 className="admin-primary-button"

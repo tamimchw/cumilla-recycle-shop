@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import Admin from "./Admin";
 import { supabase } from "./supabase";
+import {
+  findDeliverySetting,
+  getDeliveryZoneKey,
+  getValidDeliveryCharge,
+} from "./deliverySettings";
 import "./App.css";
 
 const money = (amount) =>
@@ -183,6 +188,10 @@ function Storefront() {
   const [orderInfo, setOrderInfo] = useState(null);
   const [orderSubmitting, setOrderSubmitting] = useState(false);
   const [orderError, setOrderError] = useState("");
+  const [deliverySettings, setDeliverySettings] = useState([]);
+  const [deliverySettingsLoading, setDeliverySettingsLoading] = useState(true);
+  const [deliverySettingsError, setDeliverySettingsError] = useState("");
+  const [district, setDistrict] = useState("");
 
   // Load products and banners from Supabase
   useEffect(() => {
@@ -221,6 +230,38 @@ function Storefront() {
     loadProducts();
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadDeliverySettings() {
+      setDeliverySettingsLoading(true);
+      setDeliverySettingsError("");
+
+      try {
+        const { data, error } = await supabase
+          .from("delivery_settings")
+          .select("district, delivery_charge")
+          .eq("is_active", true);
+
+        if (error) throw error;
+        if (!cancelled) setDeliverySettings(data || []);
+      } catch (error) {
+        if (!cancelled) {
+          setDeliverySettingsError(
+            error.message || "Delivery charges could not be loaded."
+          );
+        }
+      } finally {
+        if (!cancelled) setDeliverySettingsLoading(false);
+      }
+    }
+
+    loadDeliverySettings();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // Categories
   const categories = useMemo(() => {
     const names = products
@@ -256,10 +297,15 @@ function Storefront() {
     0
   );
 
-  const delivery =
-    subtotal === 0 || subtotal >= 3000 ? 0 : 80;
+  const deliveryZoneKey = district.trim()
+    ? getDeliveryZoneKey(district)
+    : null;
+  const selectedDeliverySetting = deliveryZoneKey
+    ? findDeliverySetting(deliverySettings, deliveryZoneKey)
+    : null;
+  const delivery = getValidDeliveryCharge(selectedDeliverySetting);
 
-  const total = subtotal + delivery;
+  const total = subtotal + (delivery ?? 0);
 
   // Add to cart
   const addToCart = (product) => {
@@ -342,6 +388,7 @@ function Storefront() {
       email: String(formData.get("email") || "").trim(),
       district: String(formData.get("district") || "").trim(),
       address: String(formData.get("address") || "").trim(),
+      delivery_charge: delivery,
       payment: String(
         formData.get("payment") || "Cash on Delivery"
       ),
@@ -363,6 +410,25 @@ function Storefront() {
 
     if (!/^01[0-9]{9}$/.test(orderPayload.phone)) {
       setOrderError("Enter a valid Bangladesh phone number.");
+      return;
+    }
+
+    if (deliverySettingsLoading) {
+      setOrderError("Delivery charges are still loading. Please wait.");
+      return;
+    }
+
+    if (deliverySettingsError) {
+      setOrderError(
+        "Delivery charges are unavailable. Please try again later."
+      );
+      return;
+    }
+
+    if (delivery === null) {
+      setOrderError(
+        "A delivery charge is not configured for the selected district."
+      );
       return;
     }
 
@@ -391,6 +457,7 @@ function Storefront() {
         name: orderPayload.name,
         phone: orderPayload.phone,
         district: orderPayload.district,
+        delivery_charge: delivery,
         items: totalItems,
         total: Number(data.total ?? total),
         payment: orderPayload.payment,
@@ -433,6 +500,7 @@ function Storefront() {
     setOrderPlaced(false);
     setOrderInfo(null);
     setOrderError("");
+    setDistrict("");
   };
 
   return (
@@ -893,17 +961,29 @@ function Storefront() {
                   <div>
                     <span>Delivery</span>
                     <strong>
-                      {delivery === 0 ? "FREE" : money(delivery)}
+                      {delivery === null
+                        ? deliverySettingsLoading
+                          ? "Loading..."
+                          : deliverySettingsError
+                            ? "Unavailable"
+                            : "Calculated at checkout"
+                        : delivery === 0
+                          ? "FREE"
+                          : money(delivery)}
                     </strong>
                   </div>
 
                   <div className="cart-total">
                     <span>Total</span>
-                    <strong>{money(total)}</strong>
+                    <strong>
+                      {delivery === null
+                        ? "Calculated at checkout"
+                        : money(total)}
+                    </strong>
                   </div>
 
                   <p>
-                    Free delivery on orders above ৳3,000.
+                    Delivery charge is based on your delivery district.
                   </p>
 
                   <button
@@ -969,6 +1049,11 @@ function Storefront() {
                   <div>
                     <span>District</span>
                     <strong>{orderInfo.district}</strong>
+                  </div>
+
+                  <div>
+                    <span>Delivery Charge</span>
+                    <strong>{money(orderInfo.delivery_charge)}</strong>
                   </div>
 
                   <div>
@@ -1043,6 +1128,11 @@ function Storefront() {
                     type="text"
                     name="district"
                     placeholder="Enter your district"
+                    value={district}
+                    onChange={(e) => {
+                      setDistrict(e.target.value);
+                      setOrderError("");
+                    }}
                     required
                   />
                 </label>
@@ -1072,6 +1162,25 @@ function Storefront() {
                   </span>
                 </label>
 
+                {deliverySettingsLoading && (
+                  <p className="checkout-note">Loading delivery charges...</p>
+                )}
+
+                {deliverySettingsError && (
+                  <div className="error-message">
+                    Delivery charges could not be loaded. Checkout is unavailable.
+                  </div>
+                )}
+
+                {!deliverySettingsLoading &&
+                  !deliverySettingsError &&
+                  district.trim() &&
+                  delivery === null && (
+                    <div className="error-message">
+                      No active delivery charge is configured for this district.
+                    </div>
+                  )}
+
                 <div className="checkout-total">
                   <span>Subtotal</span>
                   <strong>{money(subtotal)}</strong>
@@ -1080,13 +1189,19 @@ function Storefront() {
                 <div className="checkout-total">
                   <span>Delivery Charge</span>
                   <strong>
-                    {delivery === 0 ? "FREE" : money(delivery)}
+                    {delivery === null
+                      ? district.trim()
+                        ? "Unavailable"
+                        : "Enter district"
+                      : delivery === 0
+                        ? "FREE"
+                        : money(delivery)}
                   </strong>
                 </div>
 
                 <div className="checkout-total grand-total">
                   <span>Total Amount</span>
-                  <strong>{money(total)}</strong>
+                  <strong>{delivery === null ? "—" : money(total)}</strong>
                 </div>
 
                 {orderError && (
@@ -1098,11 +1213,21 @@ function Storefront() {
                 <button
                   type="submit"
                   className="checkout-button"
-                  disabled={orderSubmitting || cart.length === 0}
+                  disabled={
+                    orderSubmitting ||
+                    cart.length === 0 ||
+                    deliverySettingsLoading ||
+                    Boolean(deliverySettingsError) ||
+                    delivery === null
+                  }
                 >
                   {orderSubmitting
                     ? "Placing Your Order..."
-                    : `Confirm Order — ${money(total)}`}
+                    : deliverySettingsLoading
+                      ? "Loading delivery charges..."
+                      : deliverySettingsError || delivery === null
+                        ? "Checkout unavailable"
+                        : `Confirm Order — ${money(total)}`}
                 </button>
 
                 <p className="checkout-note">
