@@ -59,6 +59,7 @@ export default function Admin() {
   const [deliveryChargeDrafts, setDeliveryChargeDrafts] = useState({});
   const [deliverySettingsLoading, setDeliverySettingsLoading] = useState(false);
   const [orders, setOrders] = useState([]);
+  const [newOrderNotification, setNewOrderNotification] = useState(null);
   const [sales, setSales] = useState([]);
   const [banners, setBanners] = useState([]);
   const [bannerFile, setBannerFile] = useState(null);
@@ -609,21 +610,94 @@ export default function Admin() {
   }
 
   useEffect(() => {
-    if (!isAdmin) return;
+    if (!isAdmin || !session?.user?.id) return;
 
-    let cancelled = false;
+    const storageKey = `crs_last_seen_order_id_${session.user.id}`;
+    let isActive = true;
 
-    async function fetchData() {
-      if (cancelled) return;
-      await loadAll();
+    const channel = supabase
+      .channel(`admin-new-orders-${session.user.id}`)
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "orders" },
+        (payload) => {
+          if (!isActive || !payload?.new) return;
+          const incomingOrder = payload.new;
+          setOrders((current) => [
+            incomingOrder,
+            ...current.filter((order) => order.id !== incomingOrder.id),
+          ]);
+          setNewOrderNotification((current) => ({
+            order: incomingOrder,
+            count: (current?.count || 0) + 1,
+          }));
+        }
+      )
+      .subscribe();
+
+    async function checkUnseenOrders() {
+      const { data, error } = await supabase
+        .from("orders")
+        .select("*")
+        .order("id", { ascending: false });
+
+      if (!isActive || error) return;
+      const currentOrders = data || [];
+      setOrders(currentOrders);
+
+      const latestOrderId = currentOrders.length
+        ? Number(currentOrders[0].id)
+        : 0;
+
+      try {
+        const lastSeenValue = window.localStorage.getItem(storageKey);
+        if (lastSeenValue === null) {
+          // First visit after this feature is enabled: do not flag old orders.
+          window.localStorage.setItem(storageKey, String(latestOrderId));
+          return;
+        }
+
+        const lastSeenOrderId = Number(lastSeenValue) || 0;
+        const unseenOrders = currentOrders.filter(
+          (order) => Number(order.id) > lastSeenOrderId
+        );
+
+        if (unseenOrders.length) {
+          setNewOrderNotification({
+            order: unseenOrders[0],
+            count: unseenOrders.length,
+          });
+        }
+      } catch (storageError) {
+        console.warn("Could not read new-order notification state:", storageError);
+      }
     }
 
-    fetchData();
+    checkUnseenOrders();
 
     return () => {
-      cancelled = true;
+      isActive = false;
+      supabase.removeChannel(channel);
     };
-  }, [isAdmin]);
+  }, [isAdmin, session?.user?.id]);
+
+  function dismissNewOrderNotification(openOrders = false) {
+    if (session?.user?.id && newOrderNotification?.order?.id != null) {
+      try {
+        const storageKey = `crs_last_seen_order_id_${session.user.id}`;
+        const latestLoadedId = orders.length ? Number(orders[0].id) : 0;
+        const notifiedId = Number(newOrderNotification.order.id) || 0;
+        window.localStorage.setItem(
+          storageKey,
+          String(Math.max(latestLoadedId, notifiedId))
+        );
+      } catch (storageError) {
+        console.warn("Could not save new-order notification state:", storageError);
+      }
+    }
+    setNewOrderNotification(null);
+    if (openOrders) setPage("orders");
+  }
 
   // QR CODE GENERATION
 
@@ -2062,15 +2136,34 @@ export default function Admin() {
           {navigation.map((item) => (
             <button
               key={item.id}
-              className={page === item.id ? "active" : ""}
+              className={`${page === item.id ? "active" : ""}${item.id === "orders" && newOrderNotification ? " has-new-order" : ""}`}
               onClick={() => {
                 setPage(item.id);
                 setError("");
                 setMessage("");
+                if (item.id === "orders" && newOrderNotification) {
+                  dismissNewOrderNotification(false);
+                }
               }}
             >
               <span>{item.icon}</span>
               {item.label}
+              {item.id === "orders" && newOrderNotification && (
+                <span
+                  style={{
+                    marginLeft: "auto",
+                    padding: "2px 7px",
+                    borderRadius: "999px",
+                    background: "#dc2626",
+                    color: "#fff",
+                    fontSize: "10px",
+                    fontWeight: 800,
+                    letterSpacing: "0.04em",
+                  }}
+                >
+                  NEW{newOrderNotification.count > 1 ? ` ${newOrderNotification.count}` : ""}
+                </span>
+              )}
             </button>
           ))}
         </nav>
@@ -2112,6 +2205,55 @@ export default function Admin() {
 
           <span className="admin-status">● Admin</span>
         </div>
+
+        {newOrderNotification && (
+          <div
+            role="status"
+            aria-live="polite"
+            style={{
+              position: "fixed",
+              top: "22px",
+              right: "22px",
+              zIndex: 10000,
+              width: "min(360px, calc(100vw - 32px))",
+              padding: "18px",
+              borderRadius: "14px",
+              background: "#fff",
+              color: "#172033",
+              border: "1px solid #fecaca",
+              borderLeft: "5px solid #dc2626",
+              boxShadow: "0 16px 45px rgba(15, 23, 42, 0.22)",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: "9px", marginBottom: "8px" }}>
+              <span style={{ fontSize: "20px" }}>🔔</span>
+              <strong style={{ fontSize: "15px" }}>New Order Received!</strong>
+              <button
+                type="button"
+                onClick={() => dismissNewOrderNotification(false)}
+                aria-label="Dismiss new order notification"
+                style={{ marginLeft: "auto", border: 0, background: "transparent", fontSize: "20px", cursor: "pointer", color: "#64748b" }}
+              >
+                ×
+              </button>
+            </div>
+            <p style={{ margin: "0 0 6px", fontSize: "13px", color: "#475569" }}>
+              {newOrderNotification.count > 1
+                ? `${newOrderNotification.count} new orders are waiting for you.`
+                : `Order #${newOrderNotification.order.id} has just arrived.`}
+            </p>
+            <p style={{ margin: "0 0 14px", fontSize: "13px", fontWeight: 700 }}>
+              {newOrderNotification.order.customer_name || "New customer"} · {money(newOrderNotification.order.total)}
+            </p>
+            <button
+              type="button"
+              onClick={() => dismissNewOrderNotification(true)}
+              style={{ width: "100%", border: 0, borderRadius: "9px", padding: "10px 12px", background: "#dc2626", color: "#fff", fontWeight: 700, cursor: "pointer" }}
+            >
+              View Orders
+            </button>
+          </div>
+        )}
 
         {error && <div className="admin-error">{error}</div>}
         {message && <div className="admin-message">{message}</div>}
