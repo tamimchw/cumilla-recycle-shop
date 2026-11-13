@@ -79,7 +79,6 @@ export default function Admin() {
   const [saleCustomerName, setSaleCustomerName] = useState("");
   const [salePhone, setSalePhone] = useState("");
   const [salePayment, setSalePayment] = useState("Cash");
-  const [salePaidAmount, setSalePaidAmount] = useState("");
   const [savingSale, setSavingSale] = useState(false);
   const [selectedSale, setSelectedSale] = useState(null);
 
@@ -1356,7 +1355,6 @@ export default function Admin() {
     setSaleCustomerName("");
     setSalePhone("");
     setSalePayment("Cash");
-    setSalePaidAmount("");
   }
 
   async function createDirectSale(e) {
@@ -1378,11 +1376,9 @@ export default function Admin() {
       }
     }
 
-    const paidAmount = Number(salePaidAmount === "" ? saleSubtotal : salePaidAmount);
-    if (!Number.isFinite(paidAmount) || paidAmount < 0 || paidAmount > saleSubtotal) {
-      setError("Paid Amount must be between ৳0 and the Grand Total.");
-      return;
-    }
+    // COD orders are unpaid at the time of sale. All other methods are paid in full.
+    const isCashOnDelivery = salePayment === "Cash on Delivery";
+    const paidAmount = isCashOnDelivery ? 0 : saleSubtotal;
 
     setError("");
     setMessage("");
@@ -1412,7 +1408,7 @@ export default function Admin() {
         payment_method: salePayment,
         paid_amount: Number(data.paid_amount ?? paidAmount),
         due_amount: Number(data.due_amount ?? Math.max(0, saleSubtotal - paidAmount)),
-        payment_status: data.payment_status ?? (paidAmount >= saleSubtotal ? "paid" : paidAmount > 0 ? "partial" : "unpaid"),
+        payment_status: data.payment_status ?? (isCashOnDelivery ? "unpaid" : "paid"),
         created_at: new Date().toISOString(),
       };
 
@@ -3114,19 +3110,20 @@ export default function Admin() {
                   <option value="bKash">bKash</option>
                   <option value="Nagad">Nagad</option>
                   <option value="Bank">Bank</option>
+                  <option value="Cash on Delivery">Cash on Delivery</option>
                 </select>
 
-                <label>Paid Amount</label>
-                <input
-                  type="number"
-                  min="0"
-                  max={saleSubtotal}
-                  step="0.01"
-                  value={salePaidAmount === "" ? saleSubtotal : salePaidAmount}
-                  onChange={(e) => setSalePaidAmount(e.target.value)}
-                  placeholder="Enter amount received"
-                />
-                <p>Due Amount: {money(Math.max(0, saleSubtotal - Number(salePaidAmount === "" ? saleSubtotal : salePaidAmount)))}</p>
+                <p>
+                  Due Amount:{" "}
+                  <strong>
+                    {money(salePayment === "Cash on Delivery" ? saleSubtotal : 0)}
+                  </strong>
+                </p>
+                {salePayment === "Cash on Delivery" && (
+                  <p>
+                    Cash on Delivery selected — payment will remain pending until received.
+                  </p>
+                )}
 
                 <hr />
 
