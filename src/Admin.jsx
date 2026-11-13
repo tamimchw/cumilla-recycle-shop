@@ -458,6 +458,12 @@ export default function Admin() {
     setLoading(false);
   }
 
+  // Load admin data after admin access is confirmed.
+  useEffect(() => {
+    if (!isAdmin) return;
+    loadAll();
+  }, [isAdmin]);
+
   function categoryNameExists(name, parentId, excludedId = null) {
     const normalizedName = name.trim().toLowerCase();
     return categories.some((category) => {
