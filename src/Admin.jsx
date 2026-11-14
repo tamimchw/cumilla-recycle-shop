@@ -299,7 +299,7 @@ export default function Admin() {
 
     setMessage(`Order #${orderId} updated to ${newStatus}.`);
 
-    await loadOrders();
+    await Promise.all([loadOrders(), loadProducts()]);
 
     setSelectedOrder((current) =>
       current && current.id === orderId
@@ -3190,6 +3190,7 @@ export default function Admin() {
                             <option value="Processing">Processing</option>
                             <option value="Shipped">Shipped</option>
                             <option value="Delivered">Delivered</option>
+                            <option value="Cancelled">Cancelled</option>
                           </select>
                         </td>
 
@@ -3600,6 +3601,7 @@ export default function Admin() {
                 <option value="Processing">Processing</option>
                 <option value="Shipped">Shipped</option>
                 <option value="Delivered">Delivered</option>
+                <option value="Cancelled">Cancelled</option>
               </select>
             </div>
           </div>
