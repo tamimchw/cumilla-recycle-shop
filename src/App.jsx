@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { Analytics } from "@vercel/analytics/react";
 import Admin from "./Admin";
 import { supabase } from "./supabase";
 import {
@@ -1278,11 +1279,16 @@ function Storefront() {
 }
 
 function App() {
-  if (window.location.pathname === "/admin") {
-    return <Admin />;
-  }
-
-  return <Storefront />;
+  return (
+    <>
+      {window.location.pathname === "/admin" ? (
+        <Admin />
+      ) : (
+        <Storefront />
+      )}
+      <Analytics />
+    </>
+  );
 }
 
 export default App;
