@@ -551,15 +551,6 @@ function Storefront() {
       </header>
 
       <main>
-        {/* HOT OFFER BANNER */}
-        <section style={{ padding: "28px 5.3% 12px" }}>
-          <BannerSlot
-            banners={banners}
-            slot="hot_offer"
-            fallbackTitle="HOT OFFER"
-          />
-        </section>
-
         {/* HERO */}
         <section className="hero">
           <div className="hero-content">
